@@ -546,6 +546,14 @@ class Storage:
         cur = self.conn.execute(query, params)
         return cur.fetchall()
 
+    def wipe_all_metadata(self):
+        """Wipe all content from the database but preserve the root folder."""
+        self.conn.execute("DELETE FROM chunks")
+        self.conn.execute("DELETE FROM upload_sessions")
+        # Keep the root folder '/' (usually id 1)
+        self.conn.execute("DELETE FROM items WHERE path != '/'")
+        self.conn.commit()
+
     def close(self):
         if hasattr(self, 'conn') and self.conn:
             self.conn.close()

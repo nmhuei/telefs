@@ -582,6 +582,35 @@ class FSManager:
         except Exception as e:
             return {"healthy": False, "reason": str(e), "type": "file"}
 
+    def purge(self) -> bool:
+        """Wipe ALL remote data and local metadata."""
+        # 1. Collect all message IDs
+        msg_ids = []
+        
+        # From chunks
+        cur_chunks = self.storage.conn.execute("SELECT message_id FROM chunks WHERE message_id IS NOT NULL")
+        msg_ids.extend([r[0] for r in cur_chunks.fetchall()])
+        
+        # From legacy items
+        cur_items = self.storage.conn.execute("SELECT message_id FROM items WHERE message_id IS NOT NULL")
+        msg_ids.extend([r[0] for r in cur_items.fetchall()])
+        
+        # 2. Delete from Telegram
+        if msg_ids:
+            # Remove duplicates
+            msg_ids = list(set(msg_ids))
+            print(f"Purging {len(msg_ids)} messages from Telegram...")
+            self.tg._run_async(self._batch_delete_async(msg_ids))
+            
+        # 3. Wipe metadata
+        self.storage.wipe_all_metadata()
+        
+        # 4. Reset CWD
+        self.cwd = "/"
+        save_cwd(self.cwd)
+        
+        return True
+
     def rm(self, path: str, recursive: bool = False, force: bool = False) -> bool:
         full = self._resolve_path(path)
         if not self.storage.exists(full):

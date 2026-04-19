@@ -678,6 +678,34 @@ Usage: check <path>"""
     def complete_check(self, text, line, begidx, endidx):
         return self._complete_remote(text)
 
+    # --------------------------------------------------------------- purge --
+
+    @_guard
+    def do_purge(self, arg):
+        """Wipe ALL data from Telegram and local metadata.
+Usage: purge"""
+        self.console.print("[bold red]⚠️ CAUTION: THIS WILL PERMANENTLY DELETE ALL DATA ON TELEGRAM AND LOCALLY. ⚠️[/]")
+        self.console.print("This action is irreversible.")
+        
+        confirm1 = input("Are you sure you want to proceed? [y/N]: ").strip().lower()
+        if confirm1 != 'y':
+            print("Purge cancelled.")
+            return
+            
+        self.console.print("\nTo confirm, please type [bold red]PURGE[/] (case-sensitive):")
+        confirm2 = input("> ").strip()
+        
+        if confirm2 == "PURGE":
+            self.console.print("Processing total purge...")
+            ok = self.fs.purge()
+            if ok:
+                self.console.print("[bold green]Total purge complete. Your TeleFS is now clean.[/]")
+            else:
+                self.console.print("[bold red]Purge failed during execution.[/]")
+                self._last_failed = True
+        else:
+            self.console.print("Verification failed. Purge cancelled.")
+
     # ------------------------------------------------------------------- rm --
 
     @_guard
@@ -1417,6 +1445,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("check", help="Verify message integrity")
     p.add_argument("path", nargs="?", default=".")
+
+    p = sub.add_parser("purge", help="Wipe all remote and local data")
 
     for name in ("upload", "ul"):
         p = sub.add_parser(name, help="Upload file or directory")

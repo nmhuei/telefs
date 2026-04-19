@@ -16,6 +16,7 @@ class Storage:
         self.conn = sqlite3.connect(
             self.db_path,
             check_same_thread=False,  # FIX: allow use across threads (async workers)
+            timeout=30.0,             # FIX: wait longer for locks
         )
         self.conn.row_factory = sqlite3.Row
         # FIX: enable WAL mode for better concurrency and crash safety

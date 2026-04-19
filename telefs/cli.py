@@ -72,6 +72,11 @@ def _guard(method):
             if hasattr(self, "_last_failed"):
                 self._last_failed = True
             self.console.print("\n[dim]Interrupted.[/]")
+        except sqlite3.OperationalError as exc:
+            if "database is locked" in str(exc).lower():
+                self.console.print("[bold red]Error:[/] Database is locked by another process. Please wait or check if another telefs command is running.")
+            else:
+                self.console.print(f"[bold red]Database error:[/] {exc}")
         except Exception as exc:
             if hasattr(self, "_last_failed"):
                 self._last_failed = True
@@ -1367,10 +1372,18 @@ def run_one_shot(args):
                     table.add_row(k, str(v))
                 console.print(table)
 
-    except KeyboardInterrupt:
-        print("\nAborted.")
+    except sqlite3.OperationalError as exc:
+        if "database is locked" in str(exc).lower():
+            console.print("[bold red]Error:[/] Database is locked. Another telefs command may be running.")
+        else:
+            console.print(f"[bold red]Database error:[/] {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        console.print(f"[bold red]Unexpected error:[/] {exc}")
+        sys.exit(1)
     finally:
-        fs.disconnect()
+        if fs:
+            fs.disconnect()
 
 
 # ---------------------------------------------------------------------------
@@ -1382,7 +1395,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="telefs",
         description="TeleFS — Telegram as a remote filesystem",
     )
-    parser.add_argument("--version", action="version", version="TeleFS 0.2.4")
+    parser.add_argument("--version", action="version", version="TeleFS 0.2.12")
     sub = parser.add_subparsers(dest="command", help="Sub-command")
 
     sub.add_parser("status", help="Show connection and storage status")

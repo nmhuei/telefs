@@ -138,6 +138,15 @@ class TelegramFSClient:
     async def _disconnect(self):
         """Asynchronous disconnect core."""
         if self.client:
+            # Cancel any pending tasks in the current loop to avoid "Task destroyed" warnings
+            try:
+                loop = self._get_loop()
+                if loop and loop.is_running():
+                    pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                    for task in pending:
+                        task.cancel()
+            except Exception:
+                pass
             await self.client.disconnect()
 
     def disconnect(self):

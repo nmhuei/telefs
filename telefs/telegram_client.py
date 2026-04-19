@@ -1,6 +1,7 @@
 """Telegram client wrapper using Telethon."""
 import asyncio
 import os
+import warnings
 from pathlib import Path
 from typing import Optional, Tuple, Any
 
@@ -16,6 +17,8 @@ class TelegramFSClient:
     def __init__(self):
         self.client: Optional[TelegramClient] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Suppress Telethon's warning about already authorized session
+        warnings.filterwarnings("ignore", category=UserWarning, module="telethon.client.auth")
 
     def _get_loop(self):
         if self._loop is None:

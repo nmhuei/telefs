@@ -177,9 +177,10 @@ class TeleFSShell(cmd.Cmd):
         self.fs.rm(path, recursive)
 
     def do_login(self, arg):
-        """
-        Configure Telegram API credentials and log in.
-        Usage: login
+        """Configure Telegram API credentials and log in.
+        
+        This will guide you through entering your API ID and Hash from my.telegram.org
+        and performing the first-time SMS authentication.
         """
         self.console.print("[bold blue]== TeleFS Setup ==[/]")
         self.console.print("Get your API ID and Hash from [underline]https://my.telegram.org[/]\n")
@@ -297,6 +298,7 @@ def run_one_shot(args):
 
 def main():
     parser = argparse.ArgumentParser(description="TeleFS - Telegram as a remote filesystem")
+    parser.add_argument("--version", action="version", version="TeleFS 0.1.6")
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
     # ls

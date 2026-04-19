@@ -10,17 +10,14 @@ const venvPath = path.join(projectRoot, '.venv');
 console.log('\n🚀 TeleFS: Running post-installation setup...');
 
 function getPython() {
-    try {
-        execSync('python3 --version', { stdio: 'ignore' });
-        return 'python3';
-    } catch (e) {
+    const versions = ['python3.13', 'python3.12', 'python3.11', 'python3', 'python'];
+    for (const v of versions) {
         try {
-            execSync('python --version', { stdio: 'ignore' });
-            return 'python';
-        } catch (e2) {
-            return null;
-        }
+            execSync(`${v} --version`, { stdio: 'ignore' });
+            return v;
+        } catch (e) {}
     }
+    return null;
 }
 
 const python = getPython();
@@ -36,7 +33,14 @@ console.log(`📡 Using: ${python}`);
 try {
     if (!fs.existsSync(venvPath)) {
         console.log('📦 Creating virtual environment...');
-        execSync(`${python} -m venv "${venvPath}"`, { cwd: projectRoot, stdio: 'inherit' });
+        try {
+            execSync(`${python} -m venv "${venvPath}"`, { cwd: projectRoot, stdio: 'pipe' });
+        } catch (e) {
+            console.error('\n❌ Error: Failed to create virtual environment.');
+            console.error('This often happens if the "venv" module is missing.');
+            console.error('Try installing it: sudo apt install python3-venv (on Ubuntu/Debian)\n');
+            process.exit(1);
+        }
     }
 
     const pip = path.join(venvPath, 'bin', 'pip');
@@ -57,10 +61,11 @@ try {
         console.log('It looks like your global NPM bin directory is not in your system PATH.');
         console.log(`Expected PATH to include: ${expectedBinPath}`);
 
-        const userShell = process.env.SHELL || '';
+        const userShell = (process.env.SHELL || '').toLowerCase();
         let configFile = '~/.bashrc';
         if (userShell.includes('zsh')) configFile = '~/.zshrc';
         else if (userShell.includes('fish')) configFile = '~/.config/fish/config.fish';
+        else if (userShell.includes('bash')) configFile = '~/.bashrc';
 
         console.log(`\nTo fix this, add the following line to your ${configFile}:`);
         

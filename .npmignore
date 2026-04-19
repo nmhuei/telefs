@@ -1,0 +1,21 @@
+# Exclude project-specific files
+scratch/
+tests/
+.git/
+.gitignore
+.npmignore
+telefs.zip
+README_assets/
+
+# Exclude local data and secrets
+metadata.db
+config.json
+*.session
+*.session-journal
+.venv/
+node_modules/
+
+# Exclude Python cache
+__pycache__/
+*.py[cod]
+*$py.class

@@ -10,6 +10,7 @@ from rich.table import Table
 from rich.tree import Tree as RichTree
 
 from .fs_manager import FSManager
+from .config import is_configured, load_config, save_config
 
 
 def print_ls_table(console: Console, items: List, fs: FSManager):
@@ -67,7 +68,11 @@ class TeleFSShell(cmd.Cmd):
             self.fs.connect()
             self._update_prompt()
         except Exception as e:
-            self.console.print(f"[bold red]Failed to connect to Telegram:[/] {e}")
+            if not is_configured():
+                self.console.print("\n[bold red]TeleFS is not configured.[/]")
+                self.console.print("Please run [bold cyan]telefs login[/] to set up your Telegram API credentials.\n")
+            else:
+                self.console.print(f"[bold red]Failed to connect to Telegram:[/] {e}")
             sys.exit(1)
 
     def _update_prompt(self):
@@ -171,6 +176,45 @@ class TeleFSShell(cmd.Cmd):
                 
         self.fs.rm(path, recursive)
 
+    def do_login(self, arg):
+        """
+        Configure Telegram API credentials and log in.
+        Usage: login
+        """
+        self.console.print("[bold blue]== TeleFS Setup ==[/]")
+        self.console.print("Get your API ID and Hash from [underline]https://my.telegram.org[/]\n")
+        
+        try:
+            config = load_config()
+            
+            api_id_input = input(f"API ID [{config.get('api_id') or ''}]: ").strip()
+            if api_id_input:
+                config['api_id'] = int(api_id_input)
+                
+            api_hash_input = input(f"API Hash [{config.get('api_hash') or ''}]: ").strip()
+            if api_hash_input:
+                config['api_hash'] = api_hash_input
+                
+            phone_input = input(f"Phone Number (with +country code) [{config.get('phone_number') or ''}]: ").strip()
+            if phone_input:
+                config['phone_number'] = phone_input
+
+            save_config(config)
+            
+            self.console.print("\n[yellow]Connecting to Telegram to verify...[/]")
+            self.fs.connect()
+            self.console.print("[bold green]Success![/] You are now logged in.")
+            self._update_prompt()
+            
+        except ValueError as ve:
+            self.console.print(f"[bold red]Invalid input:[/] {ve}")
+        except Exception as e:
+            self.console.print(f"[bold red]Login failed:[/] {e}")
+
+    def do_help(self, arg):
+        """Show help for commands."""
+        super().do_help(arg)
+
     def do_exit(self, arg):
         """Exit the shell."""
         print("Goodbye!")
@@ -219,7 +263,11 @@ def run_one_shot(args):
     try:
         fs.connect()
     except Exception as e:
-        console.print(f"[bold red]Connection error:[/] {e}")
+        if not is_configured():
+            console.print("\n[bold red]TeleFS is not configured.[/]")
+            console.print("Please run [bold cyan]telefs login[/] to set up your Telegram API credentials.\n")
+        else:
+            console.print(f"[bold red]Connection error:[/] {e}")
         sys.exit(1)
 
     try:
@@ -282,7 +330,25 @@ def main():
     parser_rm.add_argument("path", help="Path to remove")
     parser_rm.add_argument("-r", "--recursive", action="store_true")
 
+    # login
+    subparsers.add_parser("login", help="Configure and log in to Telegram")
+
+    # help alias
+    subparsers.add_parser("help", help="Show this help message")
+
     args = parser.parse_args()
+
+    if args.command == "help":
+        parser.print_help()
+        return
+
+    if args.command == "login":
+        # Interactive login logic
+        shell = TeleFSShell.__new__(TeleFSShell)
+        shell.console = Console()
+        shell.fs = FSManager()
+        shell.do_login("")
+        return
 
     if args.command:
         run_one_shot(args)

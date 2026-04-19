@@ -70,8 +70,13 @@ def get_api_credentials() -> tuple:
     config = load_config()
     api_id = config.get("api_id")
     api_hash = config.get("api_hash")
-    # In a real app, we'd prompt here, but for now we return what's in config
     return api_id, api_hash
+
+
+def is_configured() -> bool:
+    """Check if API credentials are set."""
+    api_id, api_hash = get_api_credentials()
+    return bool(api_id and api_hash)
 
 
 def get_phone_number() -> Optional[str]:

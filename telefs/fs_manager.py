@@ -22,7 +22,7 @@ class FSManager:
     def __init__(self, db_path: Optional[str] = None):
         self.storage = Storage(db_path=db_path)
         self.tg = TelegramFSClient()
-        self.cwd = get_cwd()
+        self.cwd = "/"  # Always start at root
         self.chunk_size = 20 * 1024 * 1024  # default
         self.max_concurrent = 3
         
@@ -92,12 +92,10 @@ class FSManager:
                 return True
             parent = str(Path(self.cwd).parent)
             self.cwd = self.storage.normalize_path(parent)
-            save_cwd(self.cwd)
             return True
         target = self._resolve_path(path)
         if self.storage.is_folder(target):
             self.cwd = target
-            save_cwd(self.cwd)
             return True
         return False
 
@@ -607,7 +605,6 @@ class FSManager:
         
         # 4. Reset CWD
         self.cwd = "/"
-        save_cwd(self.cwd)
         
         return True
 

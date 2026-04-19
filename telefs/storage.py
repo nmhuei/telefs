@@ -104,7 +104,7 @@ class Storage:
 
         if version == 2:
             try:
-                self.conn.execute("ALTER TABLE items ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                self.conn.execute("ALTER TABLE items ADD COLUMN updated_at TIMESTAMP")
             except sqlite3.OperationalError:
                 pass
             self.conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (3)")
@@ -121,6 +121,13 @@ class Storage:
             self.conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (4)")
             self.conn.commit()
             version = 4
+            
+        # Ensure updated_at column exists in case of previous migration skips
+        try:
+            self.conn.execute("ALTER TABLE items ADD COLUMN updated_at TIMESTAMP")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
     def normalize_path(self, path: str) -> str:
         """Normalize a path to start with '/' and remove trailing slash (except root)."""

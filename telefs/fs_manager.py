@@ -11,7 +11,7 @@ from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn, TransferSpeedColumn, TimeRemainingColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeRemainingColumn
 
 from .storage import Storage
 from .telegram_client import TelegramFSClient, SESSION_PATH
@@ -29,6 +29,7 @@ class FSManager:
         self.chunk_size = 20 * 1024 * 1024  # default
         self.max_concurrent = 8             # high speed concurrency
         self.max_concurrent_files = 3       # parallel file transfers
+        self.file_semaphore = asyncio.Semaphore(self.max_concurrent_files)
         
         # Repair any metadata inconsistencies on startup
         try:
@@ -308,7 +309,10 @@ class FSManager:
         if not local_path.is_file():
             self.console.print(f"[red]Error:[/] '{local_path_str}' is not a file or directory.")
             return False
-        return self.tg._run_async(self._upload_chunked(str(local_path), remote_folder, progress, pbar))
+        async def single_upload():
+            async with self.file_semaphore:
+                return await self._upload_chunked(str(local_path), remote_folder, progress, pbar)
+        return self.tg._run_async(single_upload())
 
     def upload_directory(self, local_root: Path, remote_parent: str, progress=True) -> bool:
         self.console.print(f"Scanning directory: [bold cyan]{local_root}[/]")
@@ -339,28 +343,30 @@ class FSManager:
 
         success = True
         
-        if progress and total_chunks > 0:
+        if progress and len(upload_queue) > 0:
             with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
+                TextColumn("[bold blue]{task.description}"),
                 BarColumn(bar_width=None),
-                DownloadColumn(),
-                TransferSpeedColumn(),
+                MofNCompleteColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
                 TimeRemainingColumn(),
                 console=self.console,
-                transient=True # Hide when finished
+                transient=False
             ) as prg:
-                master_task = prg.add_task(f"Uploading {local_root.name}...", total=total_bytes)
+                master_task = prg.add_task("Uploading files...", total=len(upload_queue))
                 
-                async def upload_file_task(local_f, remote_dir, file_sem):
+                async def upload_file_task(local_f, remote_dir):
                     nonlocal success
-                    async with file_sem:
-                        res = await self._upload_chunked(local_f, remote_dir, progress=progress, progress_obj=prg, task_id=master_task)
+                    async with self.file_semaphore:
+                        # Pass progress=False to hide individual bytes tracking in the shared console
+                        res = await self._upload_chunked(local_f, remote_dir, progress=False)
                         if not res:
                             success = False
-
-                file_semaphore = asyncio.Semaphore(self.max_concurrent_files)
-                tasks = [upload_file_task(local_f, remote_dir, file_semaphore) for local_f, remote_dir in upload_queue]
+                        else:
+                            self.console.print(f"[bold green]✓[/] {Path(local_f).name}")
+                        prg.update(master_task, advance=1)
+ 
+                tasks = [upload_file_task(local_f, remote_dir) for local_f, remote_dir in upload_queue]
                 self.tg._run_async(asyncio.gather(*tasks))
         else:
             async def upload_file_task(local_f, remote_dir, file_sem):
@@ -447,17 +453,16 @@ class FSManager:
         pbar_context = None
         if not is_external_pbar and progress:
             pbar_context = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                DownloadColumn(),
-                TransferSpeedColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(bar_width=None),
+                MofNCompleteColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
                 TimeRemainingColumn(),
                 console=self.console,
-                transient=True
+                transient=False
             )
             pbar_context.start()
-            task_id = pbar_context.add_task(f"Uploading {local_path.name}...", total=file_size)
+            task_id = pbar_context.add_task(f"Uploading {local_path.name}...", total=1)
             progress_obj = pbar_context
 
         async def upload_worker(chunk_info):
@@ -510,6 +515,9 @@ class FSManager:
                 remote_path, None, 'me', file_size, True,
                 session_id=session_id, file_hash=file_hash, encryption_key=enc_key,
             )
+            if progress_obj and task_id:
+                progress_obj.update(task_id, completed=1)
+                
             if not is_external_pbar:
                 self.console.print(f"[green]✓[/] Uploaded: [bold cyan]{remote_path}[/]")
             return True
@@ -521,7 +529,10 @@ class FSManager:
     def download(self, remote_path_str: str, local_dest: Optional[str] = None, recursive=False, progress=True) -> bool:
         if recursive:
             return self.download_directory(remote_path_str, local_dest, progress)
-        return self.tg._run_async(self._download_chunked(remote_path_str, local_dest, progress))
+        async def single_download():
+            async with self.file_semaphore:
+                return await self._download_chunked(remote_path_str, local_dest, progress)
+        return self.tg._run_async(single_download())
 
     def download_directory(self, remote_path_str: str, local_dest: Optional[str] = None, progress=True) -> bool:
         full_remote = self._resolve_path(remote_path_str)
@@ -541,23 +552,21 @@ class FSManager:
         total_bytes = sum(i.get("size", 0) for i in descendants if i["type"] == "file")
         
         success = True
-        
-        if progress and total_bytes > 0:
+        if progress and len(descendants) > 0:
             with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
+                TextColumn("[bold blue]{task.description}"),
                 BarColumn(bar_width=None),
-                DownloadColumn(),
-                TransferSpeedColumn(),
+                MofNCompleteColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
                 TimeRemainingColumn(),
                 console=self.console,
-                transient=True
+                transient=False
             ) as prg:
-                master_task = prg.add_task(f"Downloading {item['name']}...", total=total_bytes)
+                master_task = prg.add_task("Downloading files...", total=len(descendants))
                 
-                async def download_file_task(d_item, sem):
+                async def download_file_task(d_item):
                     nonlocal success
-                    async with sem:
+                    async with self.file_semaphore:
                         rel_path = d_item["path"][len(full_remote):].lstrip("/")
                         local_p = target_local_root / rel_path
                         
@@ -565,16 +574,19 @@ class FSManager:
                             local_p.mkdir(parents=True, exist_ok=True)
                         else:
                             local_p.parent.mkdir(parents=True, exist_ok=True)
-                            if not await self._download_chunked(d_item["path"], str(local_p), progress=progress, progress_obj=prg, task_id=master_task):
+                            # Pass progress=False to suppress individual chunk logging
+                            if not await self._download_chunked(d_item["path"], str(local_p), progress=False):
                                 success = False
+                            else:
+                                self.console.print(f"[bold green]✓[/] {d_item['name']}")
+                        prg.update(master_task, advance=1)
 
-                file_semaphore = asyncio.Semaphore(self.max_concurrent_files)
-                tasks = [download_file_task(d_item, file_semaphore) for d_item in descendants if d_item["path"] != full_remote]
+                tasks = [download_file_task(d_item) for d_item in descendants if d_item["path"] != full_remote]
                 self.tg._run_async(asyncio.gather(*tasks))
         else:
-            async def download_file_task(d_item, sem):
+            async def download_file_task_no_prg(d_item):
                 nonlocal success
-                async with sem:
+                async with self.file_semaphore:
                     rel_path = d_item["path"][len(full_remote):].lstrip("/")
                     local_p = target_local_root / rel_path
                     if d_item["type"] == "folder":
@@ -583,6 +595,8 @@ class FSManager:
                         local_p.parent.mkdir(parents=True, exist_ok=True)
                         if not await self._download_chunked(d_item["path"], str(local_p), progress=False):
                             success = False
+            tasks = [download_file_task_no_prg(d_item) for d_item in descendants if d_item["path"] != full_remote]
+            self.tg._run_async(asyncio.gather(*tasks))
 
             file_semaphore = asyncio.Semaphore(self.max_concurrent_files)
             tasks = [download_file_task(d_item, file_semaphore) for d_item in descendants if d_item["path"] != full_remote]
@@ -660,17 +674,16 @@ class FSManager:
         pbar_context = None
         if not is_external_pbar and progress:
             pbar_context = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                DownloadColumn(),
-                TransferSpeedColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(bar_width=None),
+                MofNCompleteColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
                 TimeRemainingColumn(),
                 console=self.console,
-                transient=True
+                transient=False
             )
             pbar_context.start()
-            task_id = pbar_context.add_task(f"Downloading {item['name']}...", total=item['size'])
+            task_id = pbar_context.add_task(f"Downloading {item['name']}...", total=1)
             progress_obj = pbar_context
 
         async def download_worker(chunk_info):
@@ -779,6 +792,7 @@ class FSManager:
         # 4. Reset CWD
         self.cwd = "/"
         
+        self.console.print("[bold green]✓[/] Purge completed successfully. All remote data and local metadata wiped.")
         return True
 
     def rm(self, path: str, recursive: bool = False, force: bool = False) -> bool:

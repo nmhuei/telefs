@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="nmhuei-telefs",
-    version="0.2.15",
+    version="0.2.16",
     packages=find_packages(),
     entry_points={
         "console_scripts": [

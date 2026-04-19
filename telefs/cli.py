@@ -404,7 +404,7 @@ class TeleFSShell(cmd.Cmd):
         return self.do_exit(arg)
 
     def do_EOF(self, arg):
-        print()
+        self.console.print()
         return self.do_exit(arg)
 
     # ------------------------------------------------------------------- cd --
@@ -708,7 +708,7 @@ Usage: purge"""
         
         confirm1 = input("Are you sure you want to proceed? [y/N]: ").strip().lower()
         if confirm1 != 'y':
-            print("Purge cancelled.")
+            self.console.print("[yellow]Purge cancelled.[/]")
             return
             
         self.console.print("\nTo confirm, please type [bold red]PURGE[/] (case-sensitive):")
@@ -1256,14 +1256,14 @@ def run_one_shot(args):
             print_status(console, fs)
 
         elif cmd_name == "pwd":
-            print(fs.pwd())
+            console.print(fs.pwd())
 
         elif cmd_name == "cd":
             if not fs.cd(args.path):
-                print(f"cd: {args.path}: No such directory")
+                console.print(f"[red]cd:[/] {args.path}: No such directory")
                 sys.exit(1)
             else:
-                print(f"Working directory set to: {fs.cwd}")
+                console.print(f"Working directory set to: [bold cyan]{fs.cwd}[/]")
 
         elif cmd_name == "ls":
             paths = args.paths if args.paths else ["."]
@@ -1332,7 +1332,7 @@ def run_one_shot(args):
 
         elif cmd_name == "du":
             size = fs.du(args.path)
-            print(f"{fs._format_size(size)}\t{args.path}")
+            console.print(f"[bold]{fs._format_size(size)}[/]\t{args.path}")
 
         elif cmd_name == "find":
             item_type = None
@@ -1340,12 +1340,12 @@ def run_one_shot(args):
                 item_type = "file" if args.type == "f" else "folder"
             items = fs.storage.find_items(args.name, fs._resolve_path(args.path), item_type=item_type)
             for item in items:
-                print(item["path"])
+                console.print(item["path"])
 
         elif cmd_name == "checksum":
             h = fs.get_checksum(args.path)
             if h:
-                print(f"{h}  {args.path}")
+                console.print(f"[bold]{h}[/]  [dim]{args.path}[/]")
             else:
                 console.print(f"[red]Error:[/] '{args.path}': Not found")
                 sys.exit(1)
@@ -1364,7 +1364,7 @@ def run_one_shot(args):
                 if val is None:
                     console.print(f"[red]Error:[/] key '{args.key}' not found")
                 else:
-                    print(f"{args.key} = {val}")
+                    console.print(f"{args.key} = [bold]{val}[/]")
             elif op == "set":
                 key, val = args.key, args.val
                 if key == "api_id":
@@ -1409,7 +1409,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="telefs",
         description="TeleFS — Telegram as a remote filesystem",
     )
-    parser.add_argument("--version", action="version", version="TeleFS 0.2.15")
+    parser.add_argument("--version", action="version", version="TeleFS 0.2.16")
     sub = parser.add_subparsers(dest="command", help="Sub-command")
 
     sub.add_parser("status", help="Show connection and storage status")
@@ -1513,7 +1513,7 @@ def main():
         try:
             TeleFSShell().cmdloop()
         except KeyboardInterrupt:
-            print("\nExiting…")
+            self.console.print("\n[dim]Exiting…[/]")
         finally:
             _save_history()
         return

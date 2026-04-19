@@ -469,7 +469,11 @@ class FSManager:
                 print(f"Downloaded to: {local_path}")
                 return True
             except Exception as e:
-                print(f"Error downloading legacy file: {e}")
+                if "not found" in str(e).lower() or "no media" in str(e).lower():
+                    print(f"\n[bold red]Error:[/] Remote message {msg_id} was not found on Telegram for legacy file '{d_item['name']}'.")
+                    print("[dim]The file has likely been deleted from your 'Saved Messages' chat and is no longer recoverable.[/]")
+                else:
+                    print(f"Error downloading legacy file: {e}")
                 return False
 
         enc_key = item["encryption_key"]
@@ -520,7 +524,15 @@ class FSManager:
                             return False
 
         tasks = [download_worker(c) for c in chunks]
-        results = await asyncio.gather(*tasks)
+        try:
+            results = await asyncio.gather(*tasks)
+        except Exception as e:
+            if "not found" in str(e).lower() or "no media" in str(e).lower():
+                print(f"\n[bold red]Error:[/] One or more chunks for '{item['name']}' are missing from Telegram.")
+                print("[dim]The remote data has likely been deleted and the file is corrupted.[/]")
+            else:
+                print(f"Download failed: {e}")
+            return False
 
         if pbar:
             pbar.close()
@@ -529,13 +541,46 @@ class FSManager:
             print(f"Downloaded to: {local_path}")
             return True
         else:
-            # FIX: clean up partial file instead of leaving corrupt data
             try:
                 local_path.unlink()
             except OSError:
                 pass
             print(f"Download failed (chunks {failed_chunks}). Partial file removed.")
             return False
+
+    async def verify_item(self, remote_path_str: str) -> Dict[str, Any]:
+        """
+        Check if the remote data for an item (file or folder) is still accessible.
+        Returns a status dict with 'healthy' (bool), 'reason' (str), and 'type' ('file'/'folder').
+        """
+        item = self.storage.get_item(remote_path_str)
+        if not item:
+            return {"healthy": False, "reason": "Not found in local database", "type": "unknown"}
+        
+        if item["type"] == "folder":
+            return {"healthy": True, "reason": "Folder metadata exists", "type": "folder"}
+
+        try:
+            if not item.get("session_id"):
+                msg_id = item["message_id"]
+                if not msg_id:
+                    return {"healthy": False, "reason": "No message ID stored", "type": "file"}
+                
+                msg = await self.tg.client.get_messages(item.get("peer_id", "me"), ids=msg_id)
+                if not msg or not msg.media:
+                    return {"healthy": False, "reason": "Remote message missing or has no media", "type": "file"}
+            else:
+                chunks = self.storage.get_chunks(item["session_id"])
+                if not chunks:
+                    return {"healthy": False, "reason": "No chunks found in database", "type": "file"}
+                first_chunk = chunks[0]
+                msg = await self.tg.client.get_messages(first_chunk.get("peer_id", "me"), ids=first_chunk["message_id"])
+                if not msg or not msg.media:
+                    return {"healthy": False, "reason": f"Chunk {first_chunk['chunk_index']} missing from Telegram", "type": "file"}
+            
+            return {"healthy": True, "reason": "Remote data accessible", "type": "file"}
+        except Exception as e:
+            return {"healthy": False, "reason": str(e), "type": "file"}
 
     def rm(self, path: str, recursive: bool = False, force: bool = False) -> bool:
         full = self._resolve_path(path)

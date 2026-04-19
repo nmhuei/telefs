@@ -615,6 +615,69 @@ Usage: download [-r] <remote_path> [local_dest]"""
 
     complete_dl = complete_download
 
+    # ---------------------------------------------------------------- check --
+
+    @_guard
+    def do_check(self, arg):
+        """Check the health of remote data (verify messages exist).
+Usage: check <path>"""
+        if not arg.strip():
+            path = self.fs.cwd
+        else:
+            path = arg.strip()
+
+        full_path = self.fs._resolve_path(path)
+        if not self.fs.storage.exists(full_path):
+            self.console.print(f"[bold red]Error:[/] '{path}' not found.")
+            self._last_failed = True
+            return
+
+        items_to_check = []
+        if self.fs.storage.is_folder(full_path):
+            tree = self.fs.storage.get_tree(full_path)
+            items_to_check = [i for i in tree if i["type"] == "file"]
+        else:
+            item = self.fs.storage.get_item(full_path)
+            items_to_check = [dict(item)]
+
+        if not items_to_check:
+            self.console.print(f"[green]✓ {path} is a directory and looks healthy (metadata only).[/]")
+            return
+
+        self.console.print(f"🔍 Checking [bold]{len(items_to_check)}[/] files in {path}...")
+        
+        from rich.table import Table
+        table = Table(box=None, padding=(0, 2))
+        table.add_column("Status", width=10)
+        table.add_column("Name")
+        table.add_column("Details")
+
+        broken_count = 0
+        import asyncio
+        
+        async def check_all():
+            nonlocal broken_count
+            for i in items_to_check:
+                res = await self.fs.verify_item(i["path"])
+                if res["healthy"]:
+                    table.add_row("[green]Healthy[/]", i["name"], "[dim]Accessible[/]")
+                else:
+                    table.add_row("[bold red]Broken[/]", i["name"], f"[red]{res['reason']}[/]")
+                    broken_count += 1
+        
+        self.fs.tg._run_async(check_all())
+        self.console.print(table)
+
+        if broken_count > 0:
+            self.console.print(f"\n[bold red]Found {broken_count} broken files.[/]")
+            self.console.print("[dim]Use 'rm' to remove broken metadata or check your Telegram account.[/]")
+            self._last_failed = True
+        else:
+            self.console.print("\n[bold green]All files are healthy![/]")
+
+    def complete_check(self, text, line, begidx, endidx):
+        return self._complete_remote(text)
+
     # ------------------------------------------------------------------- rm --
 
     @_guard
@@ -1351,6 +1414,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("checksum", help="Show SHA-256 of a file")
     p.add_argument("path")
+
+    p = sub.add_parser("check", help="Verify message integrity")
+    p.add_argument("path", nargs="?", default=".")
 
     for name in ("upload", "ul"):
         p = sub.add_parser(name, help="Upload file or directory")

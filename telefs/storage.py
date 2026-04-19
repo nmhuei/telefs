@@ -329,13 +329,17 @@ class Storage:
 
     def delete_recursive(self, path: str) -> int:
         path = self.normalize_path(path)
-        if path == "/":
-            return 0
         escaped_path = path.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-        cur = self.conn.execute("""
-            SELECT path FROM items
-            WHERE path = ? OR path LIKE ? || '/%' ESCAPE '\\'
-        """, (path, escaped_path))
+        
+        if path == "/":
+            # Select everything EXCEPT the root folder itself
+            cur = self.conn.execute("SELECT path FROM items WHERE path != '/'")
+        else:
+            cur = self.conn.execute("""
+                SELECT path FROM items
+                WHERE path = ? OR path LIKE ? || '/%' ESCAPE '\\'
+            """, (path, escaped_path))
+            
         paths = [row["path"] for row in cur.fetchall()]
         for p in paths:
             self.conn.execute("DELETE FROM items WHERE path = ?", (p,))

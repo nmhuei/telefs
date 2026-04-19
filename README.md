@@ -1,77 +1,77 @@
 # TeleFS 🚀
 
-**Telegram as a Remote Filesystem**
+**Sử dụng Telegram làm Hệ thống tệp từ xa (Remote Filesystem)**
 
-TeleFS is a high-performance, secure, and reliable virtual filesystem CLI that uses Telegram's "Saved Messages" as a backend. It allows you to store, manage, and retrieve files directly from your Telegram account with advanced features like chunked transfers, AES encryption, and deduplication.
+TeleFS là một công cụ CLI mạnh mẽ, bảo mật và đáng tin cậy, biến "Saved Messages" (Tin nhắn đã lưu) trên Telegram của bạn thành một ổ đĩa ảo. Bạn có thể lưu trữ, quản lý và tải tệp trực tiếp từ tài khoản Telegram với các tính năng nâng cao như truyền tải theo mảnh (chunk), mã hóa AES và khử trùng lặp dữ liệu (deduplication).
 
-## ✨ Features
+## ✨ Tính năng nổi bật
 
-- **Large File Support**: Automatically splits files into chunks (up to 100MB each) for reliable transfer of files larger than 2GB.
-- **Resume-able I/O**: Interrupted uploads/downloads can be resumed from the last successful chunk.
-- **Deduplication**: Content-addressable storage ensures identical files are only stored once, saving bandwidth.
-- **AES-GCM Encryption**: Every chunk is encrypted with a unique nonce and a per-file 256-bit key.
-- **Beautiful CLI**: Interactive shell and one-shot commands powered by `rich` for stunning tables and tree views.
-- **Node.js Wrapper**: Easily installable via NPM, managing a private Python virtual environment internally.
+- **Hỗ trợ tệp tin lớn**: Tự động chia tệp thành các mảnh nhỏ (lên đến 100MB mỗi mảnh) để truyền tải các tệp lớn hơn 2GB một cách ổn định.
+- **Tiếp tục khi bị gián đoạn (Resume)**: Các tiến trình tải lên/tải xuống bị ngắt quãng có thể tiếp tục từ mảnh thành công cuối cùng.
+- **Khử trùng lặp (Deduplication)**: Nhận diện các tệp nội dung giống nhau để chỉ lưu trữ một lần duy nhất, giúp tiết kiệm băng thông.
+- **Mã hóa AES-GCM**: Mỗi mảnh dữ liệu được mã hóa bằng một mã nonce duy nhất và khóa 256-bit riêng biệt cho từng tệp.
+- **Giao diện CLI đẹp mắt**: Hỗ trợ cả chế độ dòng lệnh trực tiếp và shell tương tác với các bảng biểu và sơ đồ cây trực quan nhờ thư viện `rich`.
+- **Dễ dàng cài đặt**: Wrapper Node.js giúp cài đặt qua NPM nhanh chóng và tự động quản lý môi trường ảo Python.
 
-## 📦 Installation
+## 📦 Cài đặt
+
+Yêu cầu hệ thống: **Python 3.8+** và **Node.js**.
 
 ```bash
 npm install -g telefs
 ```
 
-*Note: TeleFS requires Python 3.8+ to be installed on your system.*
+## 🚀 Hướng dẫn sử dụng
 
-## 🚀 Getting Started
-
-### 1. Configure Credentials
-On your first run, you will need to provide your Telegram `API_ID` and `API_HASH` (get them from [my.telegram.org](https://my.telegram.org)).
+### 1. Cấu hình ban đầu
+Trong lần chạy đầu tiên, bạn cần cung cấp `API_ID` và `API_HASH` của Telegram (lấy tại [my.telegram.org](https://my.telegram.org)).
 
 ```bash
 telefs
 ```
 
-### 2. Common Commands
+### 2. Các lệnh thông dụng
 
-**List Files:**
+**Liệt kê tệp tin:**
 ```bash
 telefs ls /Documents
 ```
 
-**Upload a File:**
+**Tải tệp lên:**
 ```bash
-telefs upload ~/Movies/vacation.mp4 /Videos
+telefs upload ~/Movies/phim_hay.mp4 /Videos
 ```
 
-**Download a File:**
+**Tải tệp về:**
 ```bash
-telefs download /Videos/vacation.mp4 ./downloads/
+telefs download /Videos/phim_hay.mp4 ./downloads/
 ```
 
-**Directory Tree:**
+**Xem sơ đồ cây thư mục:**
 ```bash
 telefs tree
 ```
 
-**Remove Files:**
+**Xóa tệp/thư mục:**
 ```bash
 telefs rm -r /OldFolder
 ```
 
-## 🛠 Advanced Usage
+## 🛠 Chế độ Shell tương tác
 
-TeleFS includes an interactive shell for a full filesystem experience:
+TeleFS cung cấp một shell tương tác để bạn quản lý tệp như trên máy tính:
 
 ```bash
 telefs
-> cd /Photos
-> ls
-> ul my_photo.png
-> quit
+telefs: /> cd /Photos
+telefs: /Photos> ls
+telefs: /Photos> ul anh_meo.png
+telefs: /Photos> quit
 ```
 
-## 🔒 Security
-- **Local Metadata**: File metadata and encryption keys are stored in a local SQLite database (`~/.config/telefs/metadata.db`).
-- **End-to-End Encryption**: Data is encrypted locally before being transmitted to Telegram.
+## 🔒 Bảo mật
+- **Metadata cục bộ**: Thông tin về tệp và khóa mã hóa được lưu trữ trong cơ sở dữ liệu SQLite cục bộ (`~/.config/telefs/metadata.db`).
+- **Mã hóa đầu cuối**: Dữ liệu luôn được mã hóa trên máy của bạn trước khi gửi lên Telegram.
 
-## 📄 License
+## 📄 Giấy phép
 MIT

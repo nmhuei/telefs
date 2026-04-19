@@ -1,4 +1,5 @@
 """SQLite metadata storage for the virtual filesystem."""
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -48,7 +49,8 @@ class Storage:
                     peer_id TEXT,
                     size INTEGER DEFAULT 0,
                     encrypted BOOLEAN DEFAULT 0,
-                    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_path ON items(path)")
@@ -100,6 +102,15 @@ class Storage:
             self.conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (2)")
             self.conn.commit()
             version = 2
+
+        if version == 2:
+            # Migration to version 3: updated_at
+            try:
+                self.conn.execute("ALTER TABLE items ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            except sqlite3.OperationalError: pass
+            self.conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (3)")
+            self.conn.commit()
+            version = 3
 
     def normalize_path(self, path: str) -> str:
         """Normalize a path to start with '/' and remove trailing slash (except root)."""
@@ -158,14 +169,27 @@ class Storage:
         """, (path,))
         return cur.fetchall()
 
-    def create_folder(self, path: str) -> bool:
+    def create_folder(self, path: str, parents: bool = False) -> bool:
         """Create a new folder. Return True if created, False if exists or error."""
         path = self.normalize_path(path)
         if self.exists(path):
-            return False
+            return parents  # Success if it already exists and we are in -p mode
         if path == "/":
             return False
             
+        if parents:
+            # Recursive check/creation of parents
+            parts = [p for p in path.split("/") if p]
+            current = ""
+            for p in parts:
+                current += "/" + p
+                if not self.exists(current):
+                    # We create each parent as a folder
+                    # Note: we don't recurse with parents=True here to avoid infinite loop
+                    # although the logic above ensures it doesn't.
+                    self.create_folder(current, parents=False)
+            return True
+
         p_obj = Path(path)
         parent = str(p_obj.parent)
         name = p_obj.name
@@ -290,17 +314,58 @@ class Storage:
         self.conn.commit()
         return len(paths)
 
-    def get_tree(self, root_path: str = "/", max_level: Optional[int] = None) -> List[Dict]:
+    def rename_item(self, old_path: str, new_path: str) -> bool:
+        """Rename a file or folder. Moves descendants if folder."""
+        old_path = self.normalize_path(old_path)
+        new_path = self.normalize_path(new_path)
+        
+        if old_path == "/" or new_path == "/":
+            return False
+            
+        # Check if destination exists
+        if self.get_item(new_path):
+            return False
+            
+        # If it's a folder, update all descendants
+        if self.is_folder(old_path):
+            escaped_old = old_path.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            # Update descendants
+            # substr(path, len(old_path) + 1) gets the subpath relative to old_path
+            # Example: /old/sub/file.txt -> substr(..., 5) -> /sub/file.txt
+            self.conn.execute("""
+                UPDATE items 
+                SET path = ? || substr(path, ?) 
+                WHERE path = ? OR path LIKE ? || '/%' ESCAPE '\\'
+            """, (new_path, len(old_path) + 1, old_path, escaped_old))
+        else:
+            # Just a file
+            self.conn.execute("UPDATE items SET path = ? WHERE path = ?", (new_path, old_path))
+            
+        self.conn.commit()
+        return True
+
+    def get_tree(self, root_path: str = "/", max_level: Optional[int] = None, include_hidden: bool = False, dirs_only: bool = False) -> List[Dict]:
         """Return a list of items for tree display."""
         root_path = self.normalize_path(root_path)
         
-        if root_path == "/":
-            query = "SELECT path, type FROM items ORDER BY path ASC"
-            params = ()
-        else:
+        where_clauses = []
+        params = []
+        
+        if root_path != "/":
             escaped_root = root_path.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            query = "SELECT path, type FROM items WHERE path = ? OR path LIKE ? || '/%' ESCAPE '\\' ORDER BY path ASC"
-            params = (root_path, escaped_root)
+            where_clauses.append("(path = ? OR path LIKE ? || '/%' ESCAPE '\\')")
+            params.extend([root_path, escaped_root])
+            
+        if not include_hidden:
+            where_clauses.append("name NOT LIKE '.%'")
+            
+        if dirs_only:
+            where_clauses.append("type = 'folder'")
+            
+        query = "SELECT path, type, name, size FROM items"
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+        query += " ORDER BY path ASC"
             
         cur = self.conn.execute(query, params)
         
@@ -316,8 +381,99 @@ class Storage:
             if max_level is not None and level > max_level:
                 continue
                 
-            items.append({"path": path, "type": row["type"], "level": level})
+            items.append({
+                "path": path, 
+                "type": row["type"], 
+                "name": row["name"], 
+                "size": row["size"],
+                "level": level
+            })
         return items
+
+    def copy_item(self, old_path: str, new_path: str, recursive: bool = True) -> bool:
+        """Copy a file or folder. Virtual copy for files (reuses session_id)."""
+        old_path = self.normalize_path(old_path)
+        new_path = self.normalize_path(new_path)
+        
+        if old_path == "/" or new_path == "/":
+            return False
+            
+        # Check if source exists
+        item = self.get_item(old_path)
+        if not item:
+            return False
+            
+        # Check if destination exists
+        if self.get_item(new_path):
+            return False
+            
+        if item["type"] == "file":
+            p_obj = Path(new_path)
+            parent_path = self.normalize_path(str(p_obj.parent))
+            
+            self.conn.execute("""
+                INSERT INTO items (name, path, parent_path, type, telegram_file_id, message_id, 
+                                   peer_id, size, encrypted, session_id, file_hash, encryption_key)
+                SELECT ?, ?, ?, type, telegram_file_id, message_id, 
+                       peer_id, size, encrypted, session_id, file_hash, encryption_key
+                FROM items WHERE path = ?
+            """, (p_obj.name, new_path, parent_path, old_path))
+            self.conn.commit()
+            return True
+        elif recursive:
+            # It's a folder
+            self.create_folder(new_path)
+            escaped_old = old_path.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            
+            # Fetch all descendants
+            cur = self.conn.execute("""
+                SELECT * FROM items 
+                WHERE path LIKE ? || '/%' ESCAPE '\\' 
+                ORDER BY path ASC
+            """, (escaped_old,))
+            
+            descendants = cur.fetchall()
+            for desc in descendants:
+                rel_path = desc["path"][len(old_path):].lstrip("/")
+                desc_new_path = self.normalize_path(os.path.join(new_path, rel_path))
+                
+                # Insert based on original row
+                p_desc = Path(desc_new_path)
+                parent_desc = self.normalize_path(str(p_desc.parent))
+                
+                cols = [c for c in desc.keys() if c not in ('id', 'path', 'parent_path', 'name', 'upload_date', 'updated_at')]
+                col_names = ", ".join(cols)
+                placeholders = ", ".join(["?"] * len(cols))
+                vals = [desc[c] for c in cols]
+                
+                self.conn.execute(f"""
+                    INSERT INTO items (name, path, parent_path, {col_names})
+                    VALUES (?, ?, ?, {placeholders})
+                """, (p_desc.name, desc_new_path, parent_desc, *vals))
+                
+            self.conn.commit()
+            return True
+        return False
+
+    def find_items(self, pattern: str, root_path: str = "/", item_type: Optional[str] = None) -> List[sqlite3.Row]:
+        """Find items matching a pattern (supporting * and ?)."""
+        # Convert glob-like pattern to SQL LIKE
+        sql_pattern = pattern.replace('?', '_').replace('*', '%')
+        
+        query = "SELECT * FROM items WHERE name LIKE ?"
+        params = [sql_pattern]
+        
+        if root_path != "/":
+            escaped_root = root_path.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            query += " AND (path = ? OR path LIKE ? || '/%' ESCAPE '\\')"
+            params.extend([root_path, escaped_root])
+            
+        if item_type:
+            query += " AND type = ?"
+            params.append(item_type)
+            
+        cur = self.conn.execute(query, params)
+        return cur.fetchall()
 
     def close(self):
         if hasattr(self, 'conn') and self.conn:

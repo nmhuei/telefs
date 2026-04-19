@@ -4,14 +4,16 @@ import hashlib
 import asyncio
 import tempfile
 import shutil
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.fernet import Fernet
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 
 from tqdm import tqdm
 from .storage import Storage
 from .telegram_client import TelegramFSClient, SESSION_PATH
-from .config import get_encryption_key, is_configured, get_phone_number
+from .config import get_encryption_key, is_configured, get_phone_number, get_cwd, save_cwd
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -20,7 +22,7 @@ class FSManager:
     def __init__(self, db_path: Optional[str] = None):
         self.storage = Storage(db_path=db_path)
         self.tg = TelegramFSClient()
-        self.cwd = "/"
+        self.cwd = get_cwd()
         self.chunk_size = 20 * 1024 * 1024 # default
         self.max_concurrent = 3
 
@@ -89,12 +91,13 @@ class FSManager:
             
         if self.storage.is_folder(target):
             self.cwd = target
+            save_cwd(self.cwd)
             return True
         return False
 
-    def ls(self, path: Optional[str] = None) -> List[str]:
-        """List directory contents."""
-        if path is None:
+    def ls(self, path: str = ".", recursive: bool = False, all: bool = False) -> List[Any]:
+        """List contents of a directory."""
+        if not path:
             target = self.cwd
         elif path.startswith("/"):
             target = self.storage.normalize_path(path)
@@ -102,17 +105,135 @@ class FSManager:
             target = self.storage.normalize_path(os.path.join(self.cwd, path))
 
         if not self.storage.is_folder(target):
-            return [f"ls: {path}: No such directory"]
+            item = self.storage.get_item(target)
+            if item:
+                return [item]
+            return [f"ls: {path}: No such file or directory"]
 
-        items = self.storage.list_folder(target)
-        lines = []
-        for item in items:
-            prefix = "[DIR] " if item["type"] == "folder" else "[FILE]"
-            size_str = self._format_size(item["size"]) if item["type"] == "file" else ""
-            enc_str = " (Encrypted)" if item["encrypted"] else ""
-            name = item["name"] + ("/" if item["type"] == "folder" else "")
-            lines.append(f"{prefix} {name:<20} {size_str:>10} {enc_str}")
-        return lines if lines else ["(empty)"]
+        if recursive:
+            results = []
+            folders_to_visit = [target]
+            while folders_to_visit:
+                current = folders_to_visit.pop(0)
+                items = self.storage.list_folder(current, include_hidden=all)
+                # Add a marker for the folder header
+                results.append({"type": "header", "path": current})
+                for item in items:
+                    results.append(dict(item))
+                    if item["type"] == "folder":
+                        folders_to_visit.append(item["path"])
+            return results
+
+        return [dict(i) for i in self.storage.list_folder(target, include_hidden=all)]
+
+    def cat(self, path: str) -> bool:
+        """Download a file and print to stdout."""
+        return self.tg._run_async(self._cat_async(path))
+
+    async def _cat_async(self, path: str) -> bool:
+        full = self.storage.normalize_path(path) if path.startswith("/") else \
+               self.storage.normalize_path(os.path.join(self.cwd, path))
+        
+        item = self.storage.get_item(full)
+        if not item or item["type"] != "file":
+            print(f"cat: {path}: No such file or directory")
+            return False
+            
+        session_id = item["session_id"]
+        enc_key    = item["encryption_key"]
+        
+        if not session_id:
+            # Fallback for old format (single message)
+            msg_id = item["message_id"]
+            try:
+                data = await self.tg._download_bytes(msg_id)
+                if item["encrypted"]:
+                    # Legacy decryption (Fernet)
+                    global_key = get_encryption_key()
+                    if global_key:
+                        f = Fernet(global_key)
+                        data = f.decrypt(data)
+                    else:
+                        print("cat: file is encrypted but no legacy key found.")
+                        return False
+                
+                # Check for binary
+                if b'\x00' in data[:1024]:
+                    print("\n[Warning] Binary file detected. Skipping output. Use 'download' instead.")
+                    return False
+                print(data.decode('utf-8', errors='replace'), end='')
+                print() 
+                return True
+            except Exception as e:
+                print(f"\n[Error] Failed to read legacy file: {e}")
+                return False
+            
+        aesgcm = AESGCM(enc_key)
+        chunks = self.storage.get_chunks(session_id)
+        
+        for chunk in chunks:
+            msg_id = chunk["message_id"]
+            try:
+                data = await self.tg._download_bytes(msg_id)
+                nonce = data[:12]
+                ciphertext = data[12:]
+                plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+                # Detection of binary (very simple)
+                if b'\x00' in plaintext[:1024]:
+                    print("\n[Warning] Binary file detected. Skipping output to terminal. Use 'download' instead.")
+                    return False
+                print(plaintext.decode('utf-8', errors='replace'), end='')
+            except Exception as e:
+                print(f"\n[Error] Failed to read chunk: {e}")
+                return False
+        print() # Newline at end
+        return True
+
+    def du(self, path: str = "/") -> int:
+        """Calculate total size of a path (recursive if folder)."""
+        full = self.storage.normalize_path(path) if path.startswith("/") else \
+               self.storage.normalize_path(os.path.join(self.cwd, path))
+        
+        item = self.storage.get_item(full)
+        if not item: return 0
+        
+        if item["type"] == "file":
+            return item["size"]
+            
+        # If folder, sum children
+        escaped = full.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        cur = self.storage.conn.execute("""
+            SELECT SUM(size) as total FROM items
+            WHERE path = ? OR path LIKE ? || '/%' ESCAPE '\\'
+        """, (full, escaped))
+        row = cur.fetchone()
+        return row["total"] if row and row["total"] else 0
+
+    def stat(self, path: str) -> Optional[dict]:
+        """Get detailed info about an item."""
+        full = self.storage.normalize_path(path) if path.startswith("/") else \
+               self.storage.normalize_path(os.path.join(self.cwd, path))
+        item = self.storage.get_item(full)
+        if not item: return None
+        
+        info = dict(item)
+        info["size_h"] = self._format_size(item["size"])
+        return info
+
+    def find(self, pattern: str, path: Optional[str] = None) -> List[dict]:
+        """Find items by pattern."""
+        root = self.storage.normalize_path(path) if path else self.cwd
+        items = self.storage.find_items(pattern, root)
+        return [dict(i) for i in items]
+
+    def get_checksum(self, path: str) -> Optional[str]:
+        """Get the hash of a file."""
+        full = self.storage.normalize_path(path) if path.startswith("/") else \
+               self.storage.normalize_path(os.path.join(self.cwd, path))
+        item = self.storage.get_item(full)
+        if not item or item["type"] != "file":
+            return None
+        return item.get("file_hash")
 
     def tree(self) -> List[str]:
         """Return pretty tree representation."""
@@ -131,13 +252,13 @@ class FSManager:
             lines.append(f"{indent}{name}{suffix}")
         return lines
 
-    def mkdir(self, path: str) -> bool:
-        """Create a directory."""
+    def mkdir(self, path: str, parents: bool = False) -> bool:
+        """Create a folder."""
         if path.startswith("/"):
             full = self.storage.normalize_path(path)
         else:
             full = self.storage.normalize_path(os.path.join(self.cwd, path))
-        return self.storage.create_folder(full)
+        return self.storage.create_folder(full, parents=parents)
 
     def upload(self, local_path_str: str, remote_folder: str, recursive=False, progress=True) -> bool:
         """Upload a file or directory (if recursive)."""
@@ -317,14 +438,42 @@ class FSManager:
             return False
 
         session_id = item["session_id"]
+        local_path = Path(local_dest) if local_dest else Path.cwd() / item["name"]
+
         if not session_id:
-            print("Error: This file is in an old format and cannot be downloaded with chunked downloader.")
-            return False
+            # Fallback for old format
+            msg_id = item["message_id"]
+            if not msg_id:
+                print(f"Error: '{remote_path_str}' has no storage information (msg_id or session_id).")
+                return False
+            
+            print(f"Downloading legacy format file: {item['name']}...")
+            try:
+                if item["encrypted"]:
+                    # Must download and decrypt
+                    data = await self.tg._download_bytes(msg_id)
+                    global_key = get_encryption_key()
+                    if global_key:
+                        f = Fernet(global_key)
+                        data = f.decrypt(data)
+                    else:
+                        print("Error: Legacy encryption key missing.")
+                        return False
+                    with open(local_path, "wb") as f_out:
+                        f_out.write(data)
+                else:
+                    # Direct download
+                    await self.tg._download_file(msg_id, item.get("peer_id", "me"), local_path)
+                
+                print(f"Downloaded to: {local_path}")
+                return True
+            except Exception as e:
+                print(f"Error downloading legacy file: {e}")
+                return False
 
         enc_key = item["encryption_key"]
         aesgcm = AESGCM(enc_key)
         chunks = self.storage.get_chunks(session_id)
-        local_path = Path(local_dest) if local_dest else Path.cwd() / item["name"]
         
         semaphore = asyncio.Semaphore(self.max_concurrent)
         pbar = None
@@ -372,64 +521,75 @@ class FSManager:
             return True
         return False
 
-    def rm(self, path: str, recursive=False) -> bool:
+    def rm(self, path: str, recursive: bool = False, force: bool = False) -> bool:
         """Remove file or directory and delete from Telegram."""
         full = self.storage.normalize_path(path) if path.startswith("/") else \
                self.storage.normalize_path(os.path.join(self.cwd, path))
         
         if not self.storage.exists(full):
-            print(f"rm: {path}: No such file or directory")
-            return False
+            if not force:
+                print(f"rm: cannot remove '{path}': No such file or directory")
+            return force
             
         if self.storage.is_folder(full):
             if not recursive:
-                children = self.storage.list_folder(full)
-                if children:
-                    print(f"rm: {path}: Directory not empty (use -r)")
-                    return False
+                print(f"rm: cannot remove '{path}': Is a directory")
+                return False
             
             tree = self.storage.get_tree(full)
-            # Collect all message IDs that should be deleted
             msg_ids_to_delete = []
             
             for t_item in tree:
                 actual_item = self.storage.get_item(t_item["path"])
-                if actual_item["type"] == "file" and actual_item["session_id"]:
-                    # Reference Count Check
-                    if self.storage.get_session_usage_count(actual_item["session_id"]) <= 1:
+                if actual_item["type"] == "file":
+                    if actual_item.get("session_id") and self.storage.get_session_usage_count(actual_item["session_id"]) <= 1:
                         chunks = self.storage.get_chunks(actual_item["session_id"])
                         msg_ids_to_delete.extend([c["message_id"] for c in chunks if c["message_id"]])
-                elif actual_item["type"] == "file" and actual_item["message_id"]:
-                    # Old format file - no ref counting for simple messages yet
-                    msg_ids_to_delete.append(actual_item["message_id"])
+                    elif actual_item.get("message_id"):
+                        msg_ids_to_delete.append(actual_item["message_id"])
             
             count = self.storage.delete_recursive(full)
             if msg_ids_to_delete:
-                try:
-                    for i in range(0, len(msg_ids_to_delete), 100):
-                        self.tg.delete_messages('me', msg_ids_to_delete[i:i+100])
-                except Exception: pass
-            print(f"Removed folder and {count-1} items.")
+                self.tg._run_async(self._batch_delete_async(msg_ids_to_delete))
+            if not force: print(f"Removed folder: {path}")
             return True
         else:
             item = self.storage.get_item(full)
             msg_ids_to_delete = []
-            if item["session_id"]:
-                # Reference Count Check
-                if self.storage.get_session_usage_count(item["session_id"]) <= 1:
-                    chunks = self.storage.get_chunks(item["session_id"])
-                    msg_ids_to_delete = [c["message_id"] for c in chunks if c["message_id"]]
-            elif item["message_id"]:
+            if item.get("session_id") and self.storage.get_session_usage_count(item["session_id"]) <= 1:
+                chunks = self.storage.get_chunks(item["session_id"])
+                msg_ids_to_delete = [c["message_id"] for c in chunks if c["message_id"]]
+            elif item.get("message_id"):
                 msg_ids_to_delete = [item["message_id"]]
             
             self.storage.delete_item(full)
             if msg_ids_to_delete:
-                try:
-                    for i in range(0, len(msg_ids_to_delete), 100):
-                        self.tg.delete_messages('me', msg_ids_to_delete[i:i+100])
-                except Exception: pass
-            print(f"Removed file.")
+                self.tg._run_async(self._batch_delete_async(msg_ids_to_delete))
+            if not force: print(f"Removed file: {path}")
             return True
+
+    async def _batch_delete_async(self, msg_ids: List[int]):
+        """Helper to delete messages in batches asynchronously."""
+        try:
+            for i in range(0, len(msg_ids), 100):
+                await self.tg.delete_messages('me', msg_ids[i:i+100])
+        except Exception: pass
+
+    def mv(self, old_path: str, new_path: str) -> bool:
+        """Move or rename an item."""
+        old_path = self.storage.normalize_path(old_path) if old_path.startswith("/") else \
+                   self.storage.normalize_path(os.path.join(self.cwd, old_path))
+        new_path = self.storage.normalize_path(new_path) if new_path.startswith("/") else \
+                   self.storage.normalize_path(os.path.join(self.cwd, new_path))
+        return self.storage.rename_item(old_path, new_path)
+
+    def cp(self, old_path: str, new_path: str, recursive: bool = True) -> bool:
+        """Copy a file or folder."""
+        old_path = self.storage.normalize_path(old_path) if old_path.startswith("/") else \
+                   self.storage.normalize_path(os.path.join(self.cwd, old_path))
+        new_path = self.storage.normalize_path(new_path) if new_path.startswith("/") else \
+                   self.storage.normalize_path(os.path.join(self.cwd, new_path))
+        return self.storage.copy_item(old_path, new_path, recursive)
 
     def get_completions(self, text: str) -> List[str]:
         """Get possible completions for a path prefix."""

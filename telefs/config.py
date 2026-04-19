@@ -14,7 +14,8 @@ DEFAULT_CONFIG = {
     "encryption": {
         "enabled": False,
         "key": None  # Base64 encoded Fernet key
-    }
+    },
+    "cwd": "/"
 }
 
 CONFIG_DIR = Path.home() / ".config" / "telefs"
@@ -128,3 +129,14 @@ def get_encryption_key() -> Optional[bytes]:
         print(f"Warning: Keyring unavailable. Key saved to config file: {CONFIG_FILE}")
         
     return key
+
+def get_cwd() -> str:
+    """Get the persistent current working directory."""
+    config = load_config()
+    return config.get("cwd", "/")
+
+def save_cwd(path: str):
+    """Save the current working directory to config."""
+    config = load_config()
+    config["cwd"] = path
+    save_config(config)

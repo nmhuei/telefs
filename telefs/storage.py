@@ -159,14 +159,15 @@ class Storage:
         row = cur.fetchone()
         return row["count"] if row else 0
 
-    def list_folder(self, path: str) -> List[sqlite3.Row]:
+    def list_folder(self, path: str, include_hidden: bool = False) -> List[sqlite3.Row]:
         """List all items in a folder."""
         path = self.normalize_path(path)
-        cur = self.conn.execute("""
-            SELECT * FROM items
-            WHERE parent_path = ?
-            ORDER BY type DESC, name ASC
-        """, (path,))
+        query = "SELECT * FROM items WHERE parent_path = ?"
+        params = [path]
+        if not include_hidden:
+            query += " AND name NOT LIKE '.%'"
+        query += " ORDER BY type DESC, name ASC"
+        cur = self.conn.execute(query, params)
         return cur.fetchall()
 
     def create_folder(self, path: str, parents: bool = False) -> bool:
@@ -322,24 +323,31 @@ class Storage:
         if old_path == "/" or new_path == "/":
             return False
             
+        # Check recursive trap: cannot move a folder into itself
+        if new_path.startswith(old_path + "/") or new_path == old_path:
+            return False
+            
         # Check if destination exists
         if self.get_item(new_path):
             return False
             
-        # If it's a folder, update all descendants
+        # If it's a folder, update all descendants recursively
         if self.is_folder(old_path):
             escaped_old = old_path.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            # Update descendants
-            # substr(path, len(old_path) + 1) gets the subpath relative to old_path
-            # Example: /old/sub/file.txt -> substr(..., 5) -> /sub/file.txt
-            self.conn.execute("""
-                UPDATE items 
-                SET path = ? || substr(path, ?) 
-                WHERE path = ? OR path LIKE ? || '/%' ESCAPE '\\'
-            """, (new_path, len(old_path) + 1, old_path, escaped_old))
+            cur = self.conn.execute("SELECT id, path FROM items WHERE path = ? OR path LIKE ? || '/%' ESCAPE '\\'", (old_path, escaped_old))
+            for row in cur.fetchall():
+                pid = row["id"]
+                p_old = row["path"]
+                rel = p_old[len(old_path):].lstrip("/")
+                p_new = self.normalize_path(os.path.join(new_path, rel))
+                p_obj = Path(p_new)
+                parent_desc = self.normalize_path(str(p_obj.parent))
+                self.conn.execute("UPDATE items SET path = ?, parent_path = ?, name = ? WHERE id = ?", (p_new, parent_desc, p_obj.name, pid))
         else:
             # Just a file
-            self.conn.execute("UPDATE items SET path = ? WHERE path = ?", (new_path, old_path))
+            p_obj = Path(new_path)
+            parent_desc = self.normalize_path(str(p_obj.parent))
+            self.conn.execute("UPDATE items SET path = ?, parent_path = ?, name = ? WHERE path = ?", (new_path, parent_desc, p_obj.name, old_path))
             
         self.conn.commit()
         return True
@@ -396,6 +404,10 @@ class Storage:
         new_path = self.normalize_path(new_path)
         
         if old_path == "/" or new_path == "/":
+            return False
+            
+        # Check recursive trap: cannot copy a folder into itself
+        if new_path.startswith(old_path + "/") or new_path == old_path:
             return False
             
         # Check if source exists

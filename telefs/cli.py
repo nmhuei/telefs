@@ -423,8 +423,9 @@ class TeleFSShell(cmd.Cmd):
             return
 
         for src in srcs:
-            final_dest = os.path.join(dest, os.path.basename(src)) if is_dest_dir else dest
-            self.fs.cp(src, final_dest, recursive=recursive)
+            final_dest = os.path.join(dest, Path(src).name) if is_dest_dir else dest
+            if not self.fs.cp(src, final_dest, recursive=recursive):
+                self.console.print(f"[bold red]Error:[/] Failed to copy '{src}'.")
 
     # -------------------------------------------------------------------- mv --
     # NOTE: Only ONE definition of do_mv. The duplicate that was here before
@@ -451,7 +452,7 @@ class TeleFSShell(cmd.Cmd):
             return
 
         for src in srcs:
-            final_dest = os.path.join(dest, os.path.basename(src)) if is_dest_dir else dest
+            final_dest = os.path.join(dest, Path(src).name) if is_dest_dir else dest
             if not self.fs.mv(src, final_dest):
                 self.console.print(
                     f"[bold red]Error:[/] Failed to move '{src}'. "
@@ -798,9 +799,10 @@ def run_one_shot(args):
             raw_dest = args.paths[-1]
             for src in srcs:
                 final_dest = (
-                    os.path.join(raw_dest, os.path.basename(src)) if is_dest_dir else raw_dest
+                    os.path.join(raw_dest, Path(src).name) if is_dest_dir else raw_dest
                 )
-                fs.cp(src, final_dest, recursive=args.recursive)
+                if not fs.cp(src, final_dest, recursive=args.recursive):
+                    console.print(f"[bold red]Error:[/] Failed to copy '{src}'.")
 
         # ---- mv / rename ----
         # NOTE: mv subparser intentionally has NO -r flag (mv is always recursive
@@ -813,7 +815,7 @@ def run_one_shot(args):
             raw_dest = args.paths[-1]
             for src in srcs:
                 final_dest = (
-                    os.path.join(raw_dest, os.path.basename(src)) if is_dest_dir else raw_dest
+                    os.path.join(raw_dest, Path(src).name) if is_dest_dir else raw_dest
                 )
                 if not fs.mv(src, final_dest):
                     console.print(
@@ -912,7 +914,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="telefs",
         description="TeleFS - Telegram as a remote filesystem",
     )
-    parser.add_argument("--version", action="version", version="TeleFS 0.2.2")
+    parser.add_argument("--version", action="version", version="TeleFS 0.2.3")
     sub = parser.add_subparsers(dest="command", help="Command to execute")
 
     # ---- status ----

@@ -552,6 +552,12 @@ class FSManager:
             if msg_ids_to_delete:
                 self.tg._run_async(self._batch_delete_async(msg_ids_to_delete))
             if not force: print(f"Removed folder: {path}")
+            
+            # Revert cwd if it was deleted
+            if self.cwd == full or self.cwd.startswith(full + "/"):
+                self.cwd = "/"
+                save_cwd(self.cwd)
+                
             return True
         else:
             item = self.storage.get_item(full)
@@ -581,7 +587,15 @@ class FSManager:
                    self.storage.normalize_path(os.path.join(self.cwd, old_path))
         new_path = self.storage.normalize_path(new_path) if new_path.startswith("/") else \
                    self.storage.normalize_path(os.path.join(self.cwd, new_path))
-        return self.storage.rename_item(old_path, new_path)
+        success = self.storage.rename_item(old_path, new_path)
+        
+        # Update cwd if it was moved
+        if success and (self.cwd == old_path or self.cwd.startswith(old_path + "/")):
+            rel = self.cwd[len(old_path):].lstrip("/")
+            self.cwd = self.storage.normalize_path(os.path.join(new_path, rel))
+            save_cwd(self.cwd)
+            
+        return success
 
     def cp(self, old_path: str, new_path: str, recursive: bool = True) -> bool:
         """Copy a file or folder."""

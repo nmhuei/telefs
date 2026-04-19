@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 
-from tqdm import tqdm
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn, TransferSpeedColumn, TimeRemainingColumn
+
 from .storage import Storage
 from .telegram_client import TelegramFSClient, SESSION_PATH
 from .config import get_encryption_key, is_configured, get_phone_number, get_cwd, save_cwd
@@ -19,12 +21,14 @@ MAX_CHUNK_RETRIES = 3
 
 
 class FSManager:
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[str] = None, console: Optional[Console] = None):
         self.storage = Storage(db_path=db_path)
         self.tg = TelegramFSClient()
+        self.console = console or Console()
         self.cwd = "/"  # Always start at root
         self.chunk_size = 20 * 1024 * 1024  # default
-        self.max_concurrent = 3
+        self.max_concurrent = 8             # high speed concurrency
+        self.max_concurrent_files = 3       # parallel file transfers
         
         # Repair any metadata inconsistencies on startup
         try:
@@ -59,15 +63,34 @@ class FSManager:
             stats["folders"] = cur.fetchone()[0]
             cur = self.storage.conn.execute("SELECT SUM(size) FROM items WHERE type = 'file'")
             row = cur.fetchone()
-            stats["total_size"] = row[0] if row[0] else 0
+            stats["total_size"] = row[0] if row and row[0] else 0
         except Exception:
             pass
-        return {
-            "api_configured": is_configured(),
-            "phone": get_phone_number(),
-            "session_exists": session_file.exists(),
-            "db_stats": stats,
-        }
+        return stats
+
+    def init_linux_layout(self):
+        """Create a standard Linux-like directory structure."""
+        dirs = [
+            "/bin", "/boot", "/dev", "/etc", "/home", 
+            "/lib", "/lib64", "/media", "/mnt", "/opt", 
+            "/root", "/run", "/sbin", "/srv", "/tmp", 
+            "/usr", "/var"
+        ]
+        
+        # Add a home directory for current user if possible
+        import getpass
+        try:
+            user = getpass.getuser()
+            dirs.append(f"/home/{user}")
+        except Exception:
+            pass
+
+        created_count = 0
+        for d in dirs:
+            if self.storage.create_folder(d, parents=True):
+                created_count += 1
+        
+        return created_count, len(dirs)
 
     def _resolve_path(self, path: str) -> str:
         """Resolve a path (absolute or relative to cwd) to an absolute normalized path."""
@@ -105,23 +128,65 @@ class FSManager:
         if not self.storage.is_folder(target):
             item = self.storage.get_item(target)
             if item:
-                return [item]
+                return [dict(item)]
             return [f"ls: {path}: No such file or directory"]
 
+        results = []
+        
+        # Synthesize . and .. if 'all' is requested
+        if all:
+            current_folder = self.storage.get_item(target)
+            if current_folder:
+                # Add .
+                dot = dict(current_folder)
+                dot["name"] = "."
+                results.append(dot)
+                
+                # Add ..
+                if target == "/":
+                    dot_dot = dict(current_folder) # At root, .. is .
+                    dot_dot["name"] = ".."
+                    results.append(dot_dot)
+                else:
+                    parent_path = self.storage.normalize_path(str(Path(target).parent))
+                    parent_folder = self.storage.get_item(parent_path)
+                    if parent_folder:
+                        dot_dot = dict(parent_folder)
+                        dot_dot["name"] = ".."
+                        results.append(dot_dot)
+
         if recursive:
-            results = []
             folders_to_visit = [target]
             while folders_to_visit:
                 current = folders_to_visit.pop(0)
                 items = self.storage.list_folder(current, include_hidden=all)
                 results.append({"type": "header", "path": current})
+                
+                # If all is true, items already contains hidden files, but we need to inject . and .. for each header
+                # actually, maybe just for the main path if not recursive, or for each folder if recursive.
+                # Standard linux 'ls -R -a' shows . and .. for every folder.
+                if all:
+                    this_folder = self.storage.get_item(current)
+                    if this_folder:
+                        d = dict(this_folder); d["name"] = "."; results.append(d)
+                        if current == "/":
+                            p = dict(this_folder); p["name"] = ".."; results.append(p)
+                        else:
+                            parent_path = self.storage.normalize_path(str(Path(current).parent))
+                            pf = self.storage.get_item(parent_path)
+                            if pf:
+                                p = dict(pf); p["name"] = ".."; results.append(p)
+
                 for item in items:
                     results.append(dict(item))
                     if item["type"] == "folder":
                         folders_to_visit.append(item["path"])
-            return results
-
-        return [dict(i) for i in self.storage.list_folder(target, include_hidden=all)]
+        else:
+            items = self.storage.list_folder(target, include_hidden=all)
+            for item in items:
+                results.append(dict(item))
+        
+        return results
 
     def cat(self, path: str) -> bool:
         return self.tg._run_async(self._cat_async(path))
@@ -130,7 +195,7 @@ class FSManager:
         full = self._resolve_path(path)
         item = self.storage.get_item(full)
         if not item or item["type"] != "file":
-            print(f"cat: {path}: No such file or directory")
+            self.console.print(f"[red]Error:[/] {path}: No such file or directory")
             return False
 
         session_id = item["session_id"]
@@ -147,16 +212,16 @@ class FSManager:
                         f = Fernet(global_key)
                         data = f.decrypt(data)
                     else:
-                        print("cat: file is encrypted but no legacy key found.")
+                        self.console.print("[red]cat:[/] file is encrypted but no legacy key found.")
                         return False
                 if b'\x00' in data[:1024]:
-                    print("\n[Warning] Binary file detected. Use 'download' instead.")
+                    self.console.print("\n[yellow][Warning][/] Binary file detected. Use 'download' instead.")
                     return False
-                print(data.decode('utf-8', errors='replace'), end='')
-                print()
+                self.console.print(data.decode('utf-8', errors='replace'), end='')
+                self.console.print()
                 return True
             except Exception as e:
-                print(f"\n[Error] Failed to read legacy file: {e}")
+                self.console.print(f"\n[red][Error][/] Failed to read legacy file: {e}")
                 return False
 
         aesgcm = AESGCM(enc_key)
@@ -169,13 +234,13 @@ class FSManager:
                 ciphertext = data[12:]
                 plaintext = aesgcm.decrypt(nonce, ciphertext, None)
                 if b'\x00' in plaintext[:1024]:
-                    print("\n[Warning] Binary file detected. Use 'download' instead.")
+                    self.console.print("\n[yellow][Warning][/] Binary file detected. Use 'download' instead.")
                     return False
-                print(plaintext.decode('utf-8', errors='replace'), end='')
+                self.console.print(plaintext.decode('utf-8', errors='replace'), end='')
             except Exception as e:
-                print(f"\n[Error] Failed to read chunk: {e}")
+                self.console.print(f"\n[red][Error][/] Failed to read chunk: {e}")
                 return False
-        print()
+        self.console.print()
         return True
 
     def du(self, path: str = "/") -> int:
@@ -230,25 +295,33 @@ class FSManager:
         full = self._resolve_path(path)
         return self.storage.create_folder(full, parents=parents)
 
-    def upload(self, local_path_str: str, remote_folder: str, recursive=False, progress=True) -> bool:
+    def upload(self, local_path_str: str, remote_folder: str, recursive=False, progress=True, pbar=None) -> bool:
         local_path = Path(local_path_str).expanduser().resolve()
         if local_path.is_dir():
             if not recursive:
-                print(f"Error: '{local_path_str}' is a directory. Use -r for recursive upload.")
+                self.console.print(f"[red]Error:[/] '{local_path_str}' is a directory. Use -r for recursive upload.")
                 return False
+            # If called directly (not from upload_directory), we use self._run_async
+            # But upload_directory itself is sync and and calls self.upload which calls _run_async.
+            # To support multi-file concurrency, we need an async version of directory upload.
             return self.upload_directory(local_path, remote_folder, progress)
         if not local_path.is_file():
-            print(f"Error: '{local_path_str}' is not a file or directory.")
+            self.console.print(f"[red]Error:[/] '{local_path_str}' is not a file or directory.")
             return False
-        return self.tg._run_async(self._upload_chunked(str(local_path), remote_folder, progress))
+        return self.tg._run_async(self._upload_chunked(str(local_path), remote_folder, progress, pbar))
 
     def upload_directory(self, local_root: Path, remote_parent: str, progress=True) -> bool:
-        print(f"Scanning directory: {local_root}")
+        self.console.print(f"Scanning directory: [bold cyan]{local_root}[/]")
+        
+        total_chunks = 0
+        total_bytes = 0
+        upload_queue = []
+        
         target_remote_root = self.storage.normalize_path(
             os.path.join(self._resolve_path(remote_parent), local_root.name)
         )
         self.mkdir(target_remote_root, parents=True)
-        success = True
+        
         for root, dirs, files in os.walk(local_root):
             rel_path = os.path.relpath(root, local_root.parent)
             current_remote_dir = self.storage.normalize_path(
@@ -258,38 +331,82 @@ class FSManager:
                 self.mkdir(os.path.join(current_remote_dir, d), parents=True)
             for f in files:
                 local_f = os.path.join(root, f)
-                if not self.upload(local_f, current_remote_dir, recursive=False, progress=progress):
-                    success = False
+                f_size = os.path.getsize(local_f)
+                c_size = self._get_optimal_chunk_size(f_size)
+                total_chunks += (f_size + c_size - 1) // c_size
+                total_bytes += f_size
+                upload_queue.append((local_f, current_remote_dir))
+
+        success = True
+        
+        if progress and total_chunks > 0:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(bar_width=None),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+                console=self.console,
+                transient=True # Hide when finished
+            ) as prg:
+                master_task = prg.add_task(f"Uploading {local_root.name}...", total=total_bytes)
+                
+                async def upload_file_task(local_f, remote_dir, file_sem):
+                    nonlocal success
+                    async with file_sem:
+                        res = await self._upload_chunked(local_f, remote_dir, progress=progress, progress_obj=prg, task_id=master_task)
+                        if not res:
+                            success = False
+
+                file_semaphore = asyncio.Semaphore(self.max_concurrent_files)
+                tasks = [upload_file_task(local_f, remote_dir, file_semaphore) for local_f, remote_dir in upload_queue]
+                self.tg._run_async(asyncio.gather(*tasks))
+        else:
+            async def upload_file_task(local_f, remote_dir, file_sem):
+                nonlocal success
+                async with file_sem:
+                    res = await self._upload_chunked(local_f, remote_dir, progress=False)
+                    if not res:
+                        success = False
+
+            file_semaphore = asyncio.Semaphore(self.max_concurrent_files)
+            tasks = [upload_file_task(local_f, remote_dir, file_semaphore) for local_f, remote_dir in upload_queue]
+            self.tg._run_async(asyncio.gather(*tasks))
+
         if success:
-            print(f"Recursive upload of '{local_root.name}' completed.")
+            self.console.print(f"[bold green]✓[/] Recursive upload of '[bold cyan]{local_root.name}[/]' completed.")
         return success
 
-    async def _upload_chunked(self, local_path_str: str, remote_folder: str, progress=True) -> bool:
+    async def _upload_chunked(self, local_path_str: str, remote_folder: str, progress=True, progress_obj=None, task_id=None) -> bool:
         local_path = Path(local_path_str).expanduser().resolve()
         if not local_path.is_file():
-            print(f"Error: '{local_path_str}' is not a file.")
+            self.console.print(f"[red]Error:[/] '{local_path_str}' is not a file.")
             return False
 
         dest_folder = self._resolve_path(remote_folder)
         if not self.storage.is_folder(dest_folder):
-            print(f"Error: Destination folder '{remote_folder}' not found.")
+            self.console.print(f"[red]Error:[/] Destination folder '{remote_folder}' not found.")
             return False
 
         remote_path = self.storage.normalize_path(os.path.join(dest_folder, local_path.name))
         file_size = local_path.stat().st_size
 
-        # Hash computation
-        print(f"Calculating hash for {local_path.name}...")
-        sha256 = hashlib.sha256()
-        with open(local_path, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                sha256.update(chunk)
-        file_hash = sha256.hexdigest()
+        # Silent hash computation
+        def compute_hash():
+            sha256 = hashlib.sha256()
+            with open(local_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    sha256.update(chunk)
+            return sha256.hexdigest()
+
+        file_hash = await asyncio.to_thread(compute_hash)
 
         # Deduplication
         existing_file = self.storage.find_file_by_hash(file_hash)
         if existing_file:
-            print("[Deduplication] Content already exists on Telegram. Linking...")
+            if not task_id:
+                self.console.print(f"[blue][Deduplication][/] Linked {local_path.name}")
             return self.storage.add_file(
                 remote_path, None, 'me', file_size,
                 encrypted=existing_file["encrypted"],
@@ -303,16 +420,18 @@ class FSManager:
 
         session = self.storage.get_active_session(remote_path)
         if session:
-            print(f"Resuming existing session for {remote_path}...")
+            if not task_id:
+                self.console.print(f"Resuming {local_path.name}...")
             session_id = session["id"]
             enc_key = session["encryption_key"]
             file_hash = session["file_hash"]
             chunk_size = session["chunk_size"]
         else:
             if self.storage.exists(remote_path):
-                print(f"Error: '{remote_path}' already exists.")
+                self.console.print(f"[red]Error:[/] '{remote_path}' already exists.")
                 return False
-            print(f"Starting new upload for {local_path.name} ({total_chunks} chunks, {chunk_size//1024//1024}MB each)...")
+            if not task_id:
+                self.console.print(f"Uploading {local_path.name}...")
             enc_key = os.urandom(32)
             session_id = self.storage.create_upload_session(
                 remote_path, total_chunks, chunk_size, enc_key, file_hash
@@ -322,50 +441,68 @@ class FSManager:
         chunks = self.storage.get_chunks(session_id)
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
-        pbar = None
-        if progress:
-            pending = sum(1 for c in chunks if c["status"] != "done")
-            done_count = total_chunks - pending
-            pbar = tqdm(total=total_chunks, initial=done_count, unit='chunk', desc=f"Uploading {local_path.name}")
+        is_external_pbar = task_id is not None
+        
+        # If no external progress object, create a temporary one for this single file
+        pbar_context = None
+        if not is_external_pbar and progress:
+            pbar_context = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+                console=self.console,
+                transient=True
+            )
+            pbar_context.start()
+            task_id = pbar_context.add_task(f"Uploading {local_path.name}...", total=file_size)
+            progress_obj = pbar_context
 
-        # FIX: retry failed chunks up to MAX_CHUNK_RETRIES times
         async def upload_worker(chunk_info):
             async with semaphore:
                 idx = chunk_info["chunk_index"]
                 if chunk_info["status"] == "done":
+                    if progress_obj and task_id:
+                        # Ensure we account for already done parts in Progress
+                        progress_obj.update(task_id, advance=min(chunk_size, file_size - (idx * chunk_size)))
                     return True
 
                 offset = idx * chunk_size
                 size = min(chunk_size, file_size - offset)
 
-                with open(local_path, "rb") as f:
-                    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                        data = mm[offset:offset + size]
+                def prepare_chunk():
+                    with open(local_path, "rb") as f:
+                        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                            data = mm[offset:offset + size]
 
-                nonce = os.urandom(12)
-                ciphertext = aesgcm.encrypt(nonce, data, None)
-                final_data = nonce + ciphertext
+                    nonce = os.urandom(12)
+                    ciphertext = aesgcm.encrypt(nonce, data, None)
+                    return nonce + ciphertext
+
+                final_data = await asyncio.to_thread(prepare_chunk)
 
                 for attempt in range(MAX_CHUNK_RETRIES):
                     try:
                         msg_id = await self.tg._upload_bytes(final_data, f"{local_path.name}.part{idx}")
                         self.storage.update_chunk(session_id, idx, msg_id, "done")
-                        if pbar:
-                            pbar.update(1)
+                        if progress_obj and task_id:
+                            progress_obj.update(task_id, advance=size)
                         return True
                     except Exception as e:
                         self.storage.increment_chunk_retry(session_id, idx)
                         if attempt < MAX_CHUNK_RETRIES - 1:
                             await asyncio.sleep(2 ** attempt)  # exponential back-off
                         else:
-                            print(f"\nChunk {idx} failed after {MAX_CHUNK_RETRIES} attempts: {e}")
+                            self.console.print(f"\n[red]Error:[/] Chunk {idx} for {local_path.name} failed after {MAX_CHUNK_RETRIES} attempts: {e}")
                             return False
 
         tasks = [upload_worker(c) for c in chunks]
         results = await asyncio.gather(*tasks)
 
-        if pbar:
-            pbar.close()
+        if pbar_context:
+            pbar_context.stop()
 
         if all(results):
             self.storage.finalize_session(session_id)
@@ -373,10 +510,12 @@ class FSManager:
                 remote_path, None, 'me', file_size, True,
                 session_id=session_id, file_hash=file_hash, encryption_key=enc_key,
             )
-            print(f"Uploaded: {remote_path}")
+            if not is_external_pbar:
+                self.console.print(f"[green]✓[/] Uploaded: [bold cyan]{remote_path}[/]")
             return True
         else:
-            print("Upload incomplete. You can resume later.")
+            if not is_external_pbar:
+                self.console.print("[red]✗[/] Upload incomplete. You can resume later.")
             return False
 
     def download(self, remote_path_str: str, local_dest: Optional[str] = None, recursive=False, progress=True) -> bool:
@@ -388,51 +527,79 @@ class FSManager:
         full_remote = self._resolve_path(remote_path_str)
         item = self.storage.get_item(full_remote)
         if not item or item["type"] != "folder":
-            print(f"Error: '{remote_path_str}' not found or is not a directory.")
+            self.console.print(f"[red]Error:[/] '{remote_path_str}' not found or is not a directory.")
             return False
 
-        # If local_dest is not provided, use CWD
         local_base = Path(local_dest) if local_dest else Path.cwd()
-        
-        # Target folder name is the same as remote folder name
         target_local_root = local_base / item["name"]
         target_local_root.mkdir(parents=True, exist_ok=True)
         
-        print(f"Downloading directory: {full_remote} -> {target_local_root}")
+        self.console.print(f"Downloading directory: [bold cyan]{full_remote}[/] -> [bold cyan]{target_local_root}[/]")
         
-        # Get all descendants
-        items = self.storage.get_tree(full_remote, include_hidden=True)
+        descendants = self.storage.get_tree(full_remote, include_hidden=True)
+        total_items = len(descendants)
+        total_bytes = sum(i.get("size", 0) for i in descendants if i["type"] == "file")
         
         success = True
-        for d_item in items:
-            if d_item["path"] == full_remote:
-                continue # Skip the root itself
+        
+        if progress and total_bytes > 0:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(bar_width=None),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+                console=self.console,
+                transient=True
+            ) as prg:
+                master_task = prg.add_task(f"Downloading {item['name']}...", total=total_bytes)
                 
-            # Compute local path
-            rel_path = d_item["path"][len(full_remote):].lstrip("/")
-            local_path = target_local_root / rel_path
-            
-            if d_item["type"] == "folder":
-                local_path.mkdir(parents=True, exist_ok=True)
-            else:
-                # Ensure parent directory exists (though get_tree ORDER BY path ASC usually means it's already there)
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                if not self.tg._run_async(self._download_chunked(d_item["path"], str(local_path), progress)):
-                    success = False
+                async def download_file_task(d_item, sem):
+                    nonlocal success
+                    async with sem:
+                        rel_path = d_item["path"][len(full_remote):].lstrip("/")
+                        local_p = target_local_root / rel_path
+                        
+                        if d_item["type"] == "folder":
+                            local_p.mkdir(parents=True, exist_ok=True)
+                        else:
+                            local_p.parent.mkdir(parents=True, exist_ok=True)
+                            if not await self._download_chunked(d_item["path"], str(local_p), progress=progress, progress_obj=prg, task_id=master_task):
+                                success = False
+
+                file_semaphore = asyncio.Semaphore(self.max_concurrent_files)
+                tasks = [download_file_task(d_item, file_semaphore) for d_item in descendants if d_item["path"] != full_remote]
+                self.tg._run_async(asyncio.gather(*tasks))
+        else:
+            async def download_file_task(d_item, sem):
+                nonlocal success
+                async with sem:
+                    rel_path = d_item["path"][len(full_remote):].lstrip("/")
+                    local_p = target_local_root / rel_path
+                    if d_item["type"] == "folder":
+                        local_p.mkdir(parents=True, exist_ok=True)
+                    else:
+                        local_p.parent.mkdir(parents=True, exist_ok=True)
+                        if not await self._download_chunked(d_item["path"], str(local_p), progress=False):
+                            success = False
+
+            file_semaphore = asyncio.Semaphore(self.max_concurrent_files)
+            tasks = [download_file_task(d_item, file_semaphore) for d_item in descendants if d_item["path"] != full_remote]
+            self.tg._run_async(asyncio.gather(*tasks))
         
         if success:
-            print(f"Recursive download of '{item['name']}' completed.")
+            self.console.print(f"[bold green]✓[/] Recursive download of '[bold cyan]{item['name']}[/]' completed.")
         return success
 
-    async def _download_chunked(self, remote_path_str: str, local_dest: Optional[str] = None, progress=True) -> bool:
+    async def _download_chunked(self, remote_path_str: str, local_dest: Optional[str] = None, progress=True, progress_obj=None, task_id=None) -> bool:
         full_remote = self._resolve_path(remote_path_str)
         item = self.storage.get_item(full_remote)
         if not item or item["type"] != "file":
-            print(f"Error: '{remote_path_str}' not found or is a directory.")
+            self.console.print(f"[red]Error:[/] '{remote_path_str}' not found or is a directory.")
             return False
 
         session_id = item["session_id"]
-        # FIX: if local_dest is a directory, place file inside it
         local_path: Path
         if local_dest:
             ld = Path(local_dest)
@@ -446,10 +613,11 @@ class FSManager:
         if not session_id:
             msg_id = item["message_id"]
             if not msg_id:
-                print(f"Error: '{remote_path_str}' has no storage information.")
+                self.console.print(f"[red]Error:[/] '{remote_path_str}' has no storage information.")
                 return False
             d_item = dict(item)
-            print(f"Downloading legacy format file: {d_item['name']}...")
+            if not task_id:
+                self.console.print(f"Downloading legacy file: {d_item['name']}...")
             try:
                 if d_item["encrypted"]:
                     data = await self.tg._download_bytes(msg_id)
@@ -458,20 +626,21 @@ class FSManager:
                         f = Fernet(global_key)
                         data = f.decrypt(data)
                     else:
-                        print("Error: Legacy encryption key missing.")
+                        self.console.print("[red]Error:[/] Legacy encryption key missing.")
                         return False
                     with open(local_path, "wb") as f_out:
                         f_out.write(data)
                 else:
                     await self.tg._download_file(msg_id, d_item.get("peer_id", "me"), local_path)
-                print(f"Downloaded to: {local_path}")
+                
+                if not task_id:
+                    self.console.print(f"[green]✓[/] Downloaded to: {local_path}")
                 return True
             except Exception as e:
                 if "not found" in str(e).lower() or "no media" in str(e).lower():
-                    print(f"\n[bold red]Error:[/] Remote message {msg_id} was not found on Telegram for legacy file '{d_item['name']}'.")
-                    print("[dim]The file has likely been deleted from your 'Saved Messages' chat and is no longer recoverable.[/]")
+                    self.console.print(f"\n[red]Error:[/] Remote message {msg_id} missing on Telegram for legacy file '{d_item['name']}'.")
                 else:
-                    print(f"Error downloading legacy file: {e}")
+                    self.console.print(f"[red]Error downloading legacy file:[/] {e}")
                 return False
 
         enc_key = item["encryption_key"]
@@ -485,65 +654,69 @@ class FSManager:
         chunk_size = row["chunk_size"]
 
         semaphore = asyncio.Semaphore(self.max_concurrent)
-        pbar = None
-        if progress:
-            pbar = tqdm(total=len(chunks), unit='chunk', desc=f"Downloading {item['name']}")
 
-        # Pre-allocate file
-        with open(local_path, "wb") as f:
-            f.truncate(item["size"])
+        is_external_pbar = task_id is not None
+        
+        pbar_context = None
+        if not is_external_pbar and progress:
+            pbar_context = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+                console=self.console,
+                transient=True
+            )
+            pbar_context.start()
+            task_id = pbar_context.add_task(f"Downloading {item['name']}...", total=item['size'])
+            progress_obj = pbar_context
 
-        failed_chunks = []
-
-        # FIX: retry download chunks like upload does
         async def download_worker(chunk_info):
-            async with semaphore:
-                idx = chunk_info["chunk_index"]
-                msg_id = chunk_info["message_id"]
-                for attempt in range(MAX_CHUNK_RETRIES):
-                    try:
-                        data = await self.tg._download_bytes(msg_id)
-                        nonce = data[:12]
-                        ciphertext = data[12:]
-                        plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-                        offset = idx * chunk_size
-                        with open(local_path, "r+b") as f:
-                            f.seek(offset)
-                            f.write(plaintext)
-                        if pbar:
-                            pbar.update(1)
-                        return True
-                    except Exception as e:
-                        if attempt < MAX_CHUNK_RETRIES - 1:
-                            await asyncio.sleep(2 ** attempt)
-                        else:
-                            print(f"\nDownload chunk {idx} failed after {MAX_CHUNK_RETRIES} attempts: {e}")
-                            failed_chunks.append(idx)
-                            return False
+            idx = chunk_info["chunk_index"]
+            msg_id = chunk_info["message_id"]
+            if not msg_id: return False
 
-        tasks = [download_worker(c) for c in chunks]
+            for attempt in range(MAX_CHUNK_RETRIES):
+                try:
+                    enc_data = await self.tg._download_bytes(msg_id)
+                    data = await asyncio.to_thread(aesgcm.decrypt, enc_data[:12], enc_data[12:], None)
+                    
+                    offset = idx * chunk_size
+                    await asyncio.to_thread(self._write_chunk, local_path, offset, data)
+                    
+                    if progress_obj and task_id:
+                        progress_obj.update(task_id, advance=len(data))
+                    return True
+                except Exception as e:
+                    if attempt < MAX_CHUNK_RETRIES - 1:
+                        await asyncio.sleep(2 ** attempt)
+                    else:
+                        self.console.print(f"\n[red]Error:[/] Chunk {idx} for {item['name']} failed after {MAX_CHUNK_RETRIES} attempts: {e}")
+                        return False
+
+        chunk_tasks = [download_worker(c) for c in chunks]
         try:
-            results = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*chunk_tasks)
         except Exception as e:
-            if "not found" in str(e).lower() or "no media" in str(e).lower():
-                print(f"\n[bold red]Error:[/] One or more chunks for '{item['name']}' are missing from Telegram.")
-                print("[dim]The remote data has likely been deleted and the file is corrupted.[/]")
-            else:
-                print(f"Download failed: {e}")
+            self.console.print(f"[red]Download failed:[/] {e}")
             return False
 
-        if pbar:
-            pbar.close()
+        if pbar_context:
+            pbar_context.stop()
 
         if all(results):
-            print(f"Downloaded to: {local_path}")
+            if not is_external_pbar:
+                self.console.print(f"[green]✓[/] Downloaded to: [bold cyan]{local_path}[/]")
             return True
         else:
             try:
                 local_path.unlink()
             except OSError:
                 pass
-            print(f"Download failed (chunks {failed_chunks}). Partial file removed.")
+            if not is_external_pbar:
+                self.console.print(f"[red]✗[/] Download failed. Partial file removed.")
             return False
 
     async def verify_item(self, remote_path_str: str) -> Dict[str, Any]:
@@ -597,7 +770,7 @@ class FSManager:
         if msg_ids:
             # Remove duplicates
             msg_ids = list(set(msg_ids))
-            print(f"Purging {len(msg_ids)} messages from Telegram...")
+            self.console.print(f"Purging {len(msg_ids)} messages from Telegram...")
             self.tg._run_async(self._batch_delete_async(msg_ids))
             
         # 3. Wipe metadata
@@ -612,12 +785,12 @@ class FSManager:
         full = self._resolve_path(path)
         if not self.storage.exists(full):
             if not force:
-                print(f"rm: cannot remove '{path}': No such file or directory")
+                self.console.print(f"[red]rm: cannot remove '{path}': No such file or directory[/]")
             return force
 
         if self.storage.is_folder(full):
             if not recursive:
-                print(f"rm: cannot remove '{path}': Is a directory")
+                self.console.print(f"[red]rm: cannot remove '{path}': Is a directory[/]")
                 return False
 
             tree = self.storage.get_tree(full)
@@ -638,7 +811,7 @@ class FSManager:
             if msg_ids_to_delete:
                 self.tg._run_async(self._batch_delete_async(msg_ids_to_delete))
             if not force:
-                print(f"Removed folder: {path}")
+                self.console.print(f"[bold green]✓[/] Removed folder: [bold cyan]{path}[/]")
 
             if self.cwd == full or self.cwd.startswith(full + "/"):
                 self.cwd = "/"
@@ -660,7 +833,7 @@ class FSManager:
             if msg_ids_to_delete:
                 self.tg._run_async(self._batch_delete_async(msg_ids_to_delete))
             if not force:
-                print(f"Removed file: {path}")
+                self.console.print(f"[bold green]✓[/] Removed file: [bold cyan]{path}[/]")
             return True
 
     async def _batch_delete_async(self, msg_ids: List[int]):

@@ -32,6 +32,7 @@ config.json
 *.session
 *.session-journal
 telefs.zip
+npm_recovery_codes.txt
 
 # Node.js
 node_modules/

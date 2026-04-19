@@ -207,7 +207,7 @@ class Storage:
         """Create a new folder. Return True if created, False if exists or error."""
         path = self.normalize_path(path)
         if self.exists(path):
-            return parents
+            return False
         if path == "/":
             return False
             

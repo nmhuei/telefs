@@ -1395,7 +1395,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="telefs",
         description="TeleFS — Telegram as a remote filesystem",
     )
-    parser.add_argument("--version", action="version", version="TeleFS 0.2.12")
+    parser.add_argument("--version", action="version", version="TeleFS 0.2.13")
     sub = parser.add_subparsers(dest="command", help="Sub-command")
 
     sub.add_parser("status", help="Show connection and storage status")

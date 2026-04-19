@@ -142,7 +142,8 @@ class TelegramFSClient:
             try:
                 loop = self._get_loop()
                 if loop and loop.is_running():
-                    pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                    current = asyncio.current_task(loop)
+                    pending = [t for t in asyncio.all_tasks(loop) if not t.done() and t is not current]
                     for task in pending:
                         task.cancel()
             except Exception:

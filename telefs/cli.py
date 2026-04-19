@@ -181,6 +181,31 @@ class TeleFSShell(cmd.Cmd):
                 
         self.fs.rm(path, recursive)
 
+    def do_status(self, arg):
+        """Show TeleFS configuration and storage status."""
+        status = self.fs.get_status()
+        
+        self.console.print("[bold blue]== TeleFS Status ==[/]")
+        
+        # Config
+        config_status = "[green]OK[/]" if status["api_configured"] else "[red]Missing (run 'telefs login')[/]"
+        self.console.print(f"API Configuration: {config_status}")
+        
+        phone = status["phone"] if status["phone"] else "[yellow]Not set[/]"
+        self.console.print(f"Phone Number: {phone}")
+        
+        # Session
+        session_status = "[green]Active (Logged in)[/]" if status["session_exists"] else "[yellow]No session found (run 'telefs login')[/]"
+        self.console.print(f"Telegram Session: {session_status}")
+        
+        # Stats
+        stats = status["db_stats"]
+        self.console.print("\n[bold]Local Metadata Statistics:[/]")
+        self.console.print(f" - Folders: {stats['folders']}")
+        self.console.print(f" - Files:   {stats['files']}")
+        self.console.print(f" - Total Size: {self.fs._format_size(stats['total_size'])}")
+        self.console.print("")
+
     def do_login(self, arg):
         """Configure Telegram API credentials and log in.
         
@@ -277,7 +302,16 @@ def run_one_shot(args):
         sys.exit(1)
 
     try:
-        if args.command == "ls":
+        if args.command == "status":
+            status = fs.get_status()
+            print("== TeleFS Status ==")
+            print(f"API Configured: {'Yes' if status['api_configured'] else 'No'}")
+            print(f"Phone Number: {status['phone'] if status['phone'] else 'Not set'}")
+            print(f"Session Active: {'Yes' if status['session_exists'] else 'No'}")
+            print(f"Folders: {status['db_stats']['folders']}")
+            print(f"Files: {status['db_stats']['files']}")
+            print(f"Total Size: {fs._format_size(status['db_stats']['total_size'])}")
+        elif args.command == "ls":
             path = args.path if args.path else fs.cwd
             items = fs.storage.list_folder(fs.storage.normalize_path(path))
             print_ls_table(console, items, fs)
@@ -303,8 +337,11 @@ def run_one_shot(args):
 
 def main():
     parser = argparse.ArgumentParser(description="TeleFS - Telegram as a remote filesystem")
-    parser.add_argument("--version", action="version", version="TeleFS 0.1.6")
+    parser.add_argument("--version", action="version", version="TeleFS 0.1.8")
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+
+    # status
+    parser_status = subparsers.add_parser("status", help="Show connection and storage status")
 
     # ls
     parser_ls = subparsers.add_parser("ls", help="List directory")

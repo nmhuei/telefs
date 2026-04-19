@@ -10,8 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from tqdm import tqdm
 from .storage import Storage
-from .telegram_client import TelegramFSClient
-from .config import get_encryption_key
+from .telegram_client import TelegramFSClient, SESSION_PATH
+from .config import get_encryption_key, is_configured, get_phone_number
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -41,6 +41,34 @@ class FSManager:
 
     def pwd(self) -> str:
         return self.cwd
+
+    def get_status(self) -> dict:
+        """Get system configuration and storage status."""
+        session_file = Path(f"{SESSION_PATH}.session")
+        
+        # Database stats
+        stats = {
+            "files": 0,
+            "folders": 0,
+            "total_size": 0
+        }
+        try:
+            cur = self.storage.conn.execute("SELECT COUNT(*) FROM items WHERE type = 'file'")
+            stats["files"] = cur.fetchone()[0]
+            cur = self.storage.conn.execute("SELECT COUNT(*) FROM items WHERE type = 'folder'")
+            stats["folders"] = cur.fetchone()[0]
+            cur = self.storage.conn.execute("SELECT SUM(size) FROM items WHERE type = 'file'")
+            row = cur.fetchone()
+            stats["total_size"] = row[0] if row[0] else 0
+        except Exception:
+            pass
+
+        return {
+            "api_configured": is_configured(),
+            "phone": get_phone_number(),
+            "session_exists": session_file.exists(),
+            "db_stats": stats
+        }
 
     def cd(self, path: str) -> bool:
         """Change current directory. Return success."""

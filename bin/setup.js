@@ -56,9 +56,21 @@ try {
         console.log('\n⚠️  ACTION REQUIRED: System PATH configuration');
         console.log('It looks like your global NPM bin directory is not in your system PATH.');
         console.log(`Expected PATH to include: ${expectedBinPath}`);
-        console.log('\nTo fix this, add the following line to your ~/.bashrc or ~/.zshrc:');
-        console.log(`\n    export PATH="${expectedBinPath}:$PATH"\n`);
-        console.log('Then run "source ~/.bashrc" (or restart your terminal) to use the "telefs" command.\n');
+
+        const userShell = process.env.SHELL || '';
+        let configFile = '~/.bashrc';
+        if (userShell.includes('zsh')) configFile = '~/.zshrc';
+        else if (userShell.includes('fish')) configFile = '~/.config/fish/config.fish';
+
+        console.log(`\nTo fix this, add the following line to your ${configFile}:`);
+        
+        if (configFile.includes('config.fish')) {
+            console.log(`\n    fish_add_path ${expectedBinPath}\n`);
+        } else {
+            console.log(`\n    export PATH="${expectedBinPath}:$PATH"\n`);
+        }
+        
+        console.log(`Then run "source ${configFile}" (or restart your terminal) to use the "telefs" command.\n`);
     } else {
         console.log('\n✨ You can now run "telefs" from anywhere!\n');
     }

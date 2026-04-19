@@ -912,7 +912,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="telefs",
         description="TeleFS - Telegram as a remote filesystem",
     )
-    parser.add_argument("--version", action="version", version="TeleFS 0.2.1")
+    parser.add_argument("--version", action="version", version="TeleFS 0.2.2")
     sub = parser.add_subparsers(dest="command", help="Command to execute")
 
     # ---- status ----
@@ -936,7 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-R", "--recursive", action="store_true", help="Recursive listing")
 
     # ---- tree ----
-    p = sub.add_parser("tree", help="Print directory tree")
+    p = sub.add_parser("tree", help="Print directory tree", add_help=False)
     p.add_argument("path", nargs="?", default="/", help="Root path")
     p.add_argument("-l", "--level", type=int, default=None, help="Maximum depth")
     p.add_argument("-a", "--all", action="store_true", help="Include hidden files")

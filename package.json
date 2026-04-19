@@ -1,6 +1,6 @@
 {
   "name": "@nmhuei/telefs",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "High-performance virtual filesystem CLI using Telegram Saved Messages as remote storage with AES encryption and deduplication.",
   "main": "bin/telefs.js",
   "bin": {

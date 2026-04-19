@@ -15,7 +15,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCo
 
 from .storage import Storage
 from .telegram_client import TelegramFSClient, SESSION_PATH
-from .config import get_encryption_key, is_configured, get_phone_number, get_cwd, save_cwd
+from .config import get_encryption_key, is_configured, get_phone_number, get_cwd, save_cwd, load_config
 
 MAX_CHUNK_RETRIES = 3
 
@@ -27,8 +27,9 @@ class FSManager:
         self.console = console or Console()
         self.cwd = "/"  # Always start at root
         self.chunk_size = 20 * 1024 * 1024  # default
-        self.max_concurrent = 8             # high speed concurrency
-        self.max_concurrent_files = 3       # parallel file transfers
+        config = load_config()
+        self.max_concurrent = config.get("max_concurrent", 8)             # high speed concurrency
+        self.max_concurrent_files = config.get("max_concurrent_files", 3) # parallel file transfers
         self.file_semaphore = asyncio.Semaphore(self.max_concurrent_files)
         
         # Repair any metadata inconsistencies on startup
@@ -265,7 +266,9 @@ class FSManager:
         if not item:
             return None
         info = dict(item)
-        info["size_h"] = self._format_size(item["size"])
+        if info["type"] == "folder":
+            info["size"] = self.du(full)
+        info["size_h"] = self._format_size(info["size"])
         return info
 
     def find(self, pattern: str, path: Optional[str] = None) -> List[dict]:

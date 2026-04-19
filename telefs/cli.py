@@ -1050,11 +1050,11 @@ Usage: config [list|get <key>|set <key> <value>]"""
                 self.console.print("[yellow]Usage:[/] config set <key> <value>")
                 return
             key, val = args[1], args[2]
-            if key == "api_id":
+            if key in ("api_id", "max_concurrent", "max_concurrent_files"):
                 try:
                     val = int(val)
                 except ValueError:
-                    self.console.print("[red]config:[/] api_id must be an integer")
+                    self.console.print(f"[red]config:[/] {key} must be an integer")
                     return
             config[key] = val
             save_config(config)
@@ -1367,11 +1367,11 @@ def run_one_shot(args):
                     console.print(f"{args.key} = [bold]{val}[/]")
             elif op == "set":
                 key, val = args.key, args.val
-                if key == "api_id":
+                if key in ("api_id", "max_concurrent", "max_concurrent_files"):
                     try:
                         val = int(val)
                     except ValueError:
-                        console.print("[red]Error:[/] api_id must be an integer")
+                        console.print(f"[red]Error:[/] {key} must be an integer")
                         return
                 config[key] = val
                 save_config(config)
@@ -1409,7 +1409,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="telefs",
         description="TeleFS — Telegram as a remote filesystem",
     )
-    parser.add_argument("--version", action="version", version="TeleFS 0.2.16")
+    parser.add_argument("--version", action="version", version="TeleFS 0.2.17")
     sub = parser.add_subparsers(dest="command", help="Sub-command")
 
     sub.add_parser("status", help="Show connection and storage status")

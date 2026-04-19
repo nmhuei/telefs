@@ -4,3 +4,4 @@ cryptography>=41.0.0
 keyring>=24.0.0
 nest-asyncio>=1.5.0
 rich>=13.0.0
+cryptg>=0.4.0

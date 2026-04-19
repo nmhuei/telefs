@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="nmhuei-telefs",
-    version="0.2.16",
+    version="0.2.17",
     packages=find_packages(),
     entry_points={
         "console_scripts": [
@@ -16,6 +16,7 @@ setup(
         "tqdm>=4.66.0",
         "rich>=13.0.0",
         "nest-asyncio>=1.5.0",
+        "cryptg>=0.4.0",
     ],
     author="Antigravity",
     description="Telegram as a remote filesystem",

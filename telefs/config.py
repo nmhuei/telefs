@@ -15,6 +15,8 @@ DEFAULT_CONFIG = {
         "enabled": False,
         "key": None  # Base64 encoded Fernet key
     },
+    "max_concurrent": 8,
+    "max_concurrent_files": 3,
     "cwd": "/"
 }
 

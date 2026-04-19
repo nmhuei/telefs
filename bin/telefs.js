@@ -23,7 +23,6 @@ let pythonProcess;
 
 function startProcess(bin) {
     return spawn(bin, args, {
-        cwd: projectRoot,
         stdio: 'inherit',
         env: {
             ...process.env,

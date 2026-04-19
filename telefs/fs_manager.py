@@ -25,6 +25,12 @@ class FSManager:
         self.cwd = get_cwd()
         self.chunk_size = 20 * 1024 * 1024  # default
         self.max_concurrent = 3
+        
+        # Repair any metadata inconsistencies on startup
+        try:
+            self.storage.repair_metadata()
+        except Exception:
+            pass
 
     def _get_optimal_chunk_size(self, file_size: int) -> int:
         if file_size < 1 * 1024 * 1024 * 1024:   # < 1 GB
@@ -65,11 +71,16 @@ class FSManager:
 
     def _resolve_path(self, path: str) -> str:
         """Resolve a path (absolute or relative to cwd) to an absolute normalized path."""
-        if not path or path == ".":
+        if not path or path.strip() == ".":
             return self.cwd
+        if path.strip() == "/":
+            return "/"
+        
         if path.startswith("/"):
             return self.storage.normalize_path(path)
-        return self.storage.normalize_path(os.path.join(self.cwd, path))
+            
+        full = os.path.join(self.cwd, path)
+        return self.storage.normalize_path(full)
 
     def cd(self, path: str) -> bool:
         """Change current directory. Return success."""
@@ -203,7 +214,7 @@ class FSManager:
         item = self.storage.get_item(full)
         if not item or item["type"] != "file":
             return None
-        return item.get("file_hash")
+        return dict(item).get("file_hash")
 
     def tree(self) -> List[str]:
         items = self.storage.get_tree("/")
@@ -370,8 +381,50 @@ class FSManager:
             print("Upload incomplete. You can resume later.")
             return False
 
-    def download(self, remote_path_str: str, local_dest: Optional[str] = None, progress=True) -> bool:
+    def download(self, remote_path_str: str, local_dest: Optional[str] = None, recursive=False, progress=True) -> bool:
+        if recursive:
+            return self.download_directory(remote_path_str, local_dest, progress)
         return self.tg._run_async(self._download_chunked(remote_path_str, local_dest, progress))
+
+    def download_directory(self, remote_path_str: str, local_dest: Optional[str] = None, progress=True) -> bool:
+        full_remote = self._resolve_path(remote_path_str)
+        item = self.storage.get_item(full_remote)
+        if not item or item["type"] != "folder":
+            print(f"Error: '{remote_path_str}' not found or is not a directory.")
+            return False
+
+        # If local_dest is not provided, use CWD
+        local_base = Path(local_dest) if local_dest else Path.cwd()
+        
+        # Target folder name is the same as remote folder name
+        target_local_root = local_base / item["name"]
+        target_local_root.mkdir(parents=True, exist_ok=True)
+        
+        print(f"Downloading directory: {full_remote} -> {target_local_root}")
+        
+        # Get all descendants
+        items = self.storage.get_tree(full_remote, include_hidden=True)
+        
+        success = True
+        for d_item in items:
+            if d_item["path"] == full_remote:
+                continue # Skip the root itself
+                
+            # Compute local path
+            rel_path = d_item["path"][len(full_remote):].lstrip("/")
+            local_path = target_local_root / rel_path
+            
+            if d_item["type"] == "folder":
+                local_path.mkdir(parents=True, exist_ok=True)
+            else:
+                # Ensure parent directory exists (though get_tree ORDER BY path ASC usually means it's already there)
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                if not self.tg._run_async(self._download_chunked(d_item["path"], str(local_path), progress)):
+                    success = False
+        
+        if success:
+            print(f"Recursive download of '{item['name']}' completed.")
+        return success
 
     async def _download_chunked(self, remote_path_str: str, local_dest: Optional[str] = None, progress=True) -> bool:
         full_remote = self._resolve_path(remote_path_str)
@@ -397,9 +450,10 @@ class FSManager:
             if not msg_id:
                 print(f"Error: '{remote_path_str}' has no storage information.")
                 return False
-            print(f"Downloading legacy format file: {item['name']}...")
+            d_item = dict(item)
+            print(f"Downloading legacy format file: {d_item['name']}...")
             try:
-                if item["encrypted"]:
+                if d_item["encrypted"]:
                     data = await self.tg._download_bytes(msg_id)
                     global_key = get_encryption_key()
                     if global_key:
@@ -411,7 +465,7 @@ class FSManager:
                     with open(local_path, "wb") as f_out:
                         f_out.write(data)
                 else:
-                    await self.tg._download_file(msg_id, item.get("peer_id", "me"), local_path)
+                    await self.tg._download_file(msg_id, d_item.get("peer_id", "me"), local_path)
                 print(f"Downloaded to: {local_path}")
                 return True
             except Exception as e:
@@ -499,12 +553,15 @@ class FSManager:
             msg_ids_to_delete = []
             for t_item in tree:
                 actual_item = self.storage.get_item(t_item["path"])
-                if actual_item["type"] == "file":
-                    if actual_item.get("session_id") and self.storage.get_session_usage_count(actual_item["session_id"]) <= 1:
-                        chunks = self.storage.get_chunks(actual_item["session_id"])
+                if not actual_item:
+                    continue
+                d_item = dict(actual_item)
+                if d_item["type"] == "file":
+                    if d_item.get("session_id") and self.storage.get_session_usage_count(d_item["session_id"]) <= 1:
+                        chunks = self.storage.get_chunks(d_item["session_id"])
                         msg_ids_to_delete.extend([c["message_id"] for c in chunks if c["message_id"]])
-                    elif actual_item.get("message_id"):
-                        msg_ids_to_delete.append(actual_item["message_id"])
+                    elif d_item.get("message_id"):
+                        msg_ids_to_delete.append(d_item["message_id"])
 
             self.storage.delete_recursive(full)
             if msg_ids_to_delete:
@@ -517,13 +574,17 @@ class FSManager:
                 save_cwd(self.cwd)
             return True
         else:
-            item = self.storage.get_item(full)
+            actual_item = self.storage.get_item(full)
+            if not actual_item:
+                return False
+            d_item = dict(actual_item)
             msg_ids_to_delete = []
-            if item.get("session_id") and self.storage.get_session_usage_count(item["session_id"]) <= 1:
-                chunks = self.storage.get_chunks(item["session_id"])
+            if d_item.get("session_id") and self.storage.get_session_usage_count(d_item["session_id"]) <= 1:
+                chunks = self.storage.get_chunks(d_item["session_id"])
                 msg_ids_to_delete = [c["message_id"] for c in chunks if c["message_id"]]
-            elif item.get("message_id"):
-                msg_ids_to_delete = [item["message_id"]]
+            elif d_item.get("message_id"):
+                msg_ids_to_delete = [d_item["message_id"]]
+            
             self.storage.delete_item(full)
             if msg_ids_to_delete:
                 self.tg._run_async(self._batch_delete_async(msg_ids_to_delete))

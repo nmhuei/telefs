@@ -63,11 +63,18 @@ def _guard(method):
     """Decorator: catch any unhandled exception inside a do_* method."""
     @functools.wraps(method)
     def wrapper(self, arg):
+        # Reset failure state at start of each command
+        if hasattr(self, "_last_failed"):
+            self._last_failed = False
         try:
             return method(self, arg)
         except KeyboardInterrupt:
+            if hasattr(self, "_last_failed"):
+                self._last_failed = True
             self.console.print("\n[dim]Interrupted.[/]")
         except Exception as exc:
+            if hasattr(self, "_last_failed"):
+                self._last_failed = True
             self.console.print(f"[bold red]Unexpected error:[/] {exc}")
     return wrapper
 
@@ -233,14 +240,22 @@ def print_tree_view(console: Console, items: List, show_size=False,
             d_count += 1
         else:
             f_count += 1
+            
         if item["path"] == root_path:
             continue
-        p_obj = Path(item["path"])
-        parent_path = str(p_obj.parent).replace("\\", "/")
-        if parent_path == ".":
-            parent_path = "/"
+            
+        # Use parent_path from database if available, else derive from string
+        parent_path = item.get("parent_path")
+        if not parent_path:
+            p_obj = Path(item["path"])
+            parent_path = str(p_obj.parent).replace("\\", "/")
+            if parent_path == ".":
+                parent_path = "/"
+        
         parent_node = tree_map.get(parent_path)
         if not parent_node:
+            # Fallback for deep structures where parent might be missing in result set
+            p_obj = Path(item["path"])
             for p in p_obj.parents:
                 ps = str(p).replace("\\", "/")
                 if ps in tree_map:
@@ -248,6 +263,7 @@ def print_tree_view(console: Console, items: List, show_size=False,
                     break
             if not parent_node:
                 parent_node = tree_map[root_path]
+        
         tree_map[item["path"]] = parent_node.add(get_display_name(item))
 
     console.print(tree_map[root_path])
@@ -361,6 +377,7 @@ class TeleFSShell(cmd.Cmd):
         self.console.print(f"[red]Unknown command:[/] [bold]{cmd_word}[/]  (type [cyan]help[/])")
 
     def emptyline(self):
+        self._last_failed = False  # Pressing Enter clears the error mark
         pass  # do not repeat last command
 
     # ---------------------------------------------------- exit / lifecycle --
@@ -574,15 +591,19 @@ Usage: upload [-r] <local_path> [remote_folder]"""
 
     @_guard
     def do_download(self, arg):
-        """Download a remote file.
-Usage: download <remote_path> [local_dest]"""
+        """Download remote files or directories.
+Usage: download [-r] <remote_path> [local_dest]"""
         args  = shlex.split(arg) if arg.strip() else []
-        if not args:
-            self.console.print("[yellow]Usage:[/] download <remote_path> [local_dest]")
+        flags, positional = parse_linux_args(args)
+        recursive = "r" in flags or "R" in flags
+
+        if not positional:
+            self.console.print("[yellow]Usage:[/] download [-r] <remote_path> [local_dest]")
             return
-        remote = args[0]
-        local  = args[1] if len(args) > 1 else None
-        ok = self.fs.download(remote, local)
+        
+        remote = positional[0]
+        local  = positional[1] if len(positional) > 1 else None
+        ok = self.fs.download(remote, local, recursive=recursive)
         self._last_failed = not ok
 
     def do_dl(self, arg):

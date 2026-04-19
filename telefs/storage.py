@@ -131,13 +131,37 @@ class Storage:
 
     def normalize_path(self, path: str) -> str:
         """Normalize a path to start with '/' and remove trailing slash (except root)."""
-        if not path:
+        if not path or path.strip() in ("", ".", "/"):
             return "/"
-        p = Path("/", path)
-        normalized = str(p.as_posix())
+        
+        # Use posixpath style normalization
+        import posixpath
+        normalized = posixpath.normpath(path)
+        
         if not normalized.startswith("/"):
             normalized = "/" + normalized
+            
         return normalized
+
+    def repair_metadata(self):
+        """Rebuild parent_path and name columns based on the path column for all items."""
+        cur = self.conn.execute("SELECT id, path FROM items WHERE path != '/'")
+        rows = cur.fetchall()
+        updates = []
+        for row in rows:
+            item_id = row["id"]
+            path = row["path"]
+            p_obj = Path(path)
+            new_parent = self.normalize_path(str(p_obj.parent))
+            new_name = p_obj.name
+            updates.append((new_parent, new_name, item_id))
+        
+        if updates:
+            self.conn.executemany(
+                "UPDATE items SET parent_path = ?, name = ? WHERE id = ?",
+                updates
+            )
+            self.conn.commit()
 
     def exists(self, path: str) -> bool:
         path = self.normalize_path(path)
@@ -330,8 +354,9 @@ class Storage:
         if self.get_item(new_path):
             return False
 
-        # FIX: verify the destination parent exists before moving
-        new_parent = self.normalize_path(str(Path(new_path).parent))
+        # Verify the destination parent exists before moving
+        p_obj_new = Path(new_path)
+        new_parent = self.normalize_path(str(p_obj_new.parent))
         if not self.exists(new_parent):
             return False
             
@@ -341,24 +366,45 @@ class Storage:
                 "SELECT id, path FROM items WHERE path = ? OR path LIKE ? || '/%' ESCAPE '\\'",
                 (old_path, escaped_old)
             )
-            for row in cur.fetchall():
+            rows = cur.fetchall()
+            for row in rows:
                 pid = row["id"]
                 p_old = row["path"]
-                rel = p_old[len(old_path):].lstrip("/")
-                p_new = self.normalize_path(os.path.join(new_path, rel)) if rel else new_path
+                
+                # Calculate relative path from the old base
+                if p_old == old_path:
+                    p_new = new_path
+                else:
+                    rel = p_old[len(old_path):].lstrip("/")
+                    p_new = self.normalize_path(new_path + "/" + rel)
+                
                 p_obj = Path(p_new)
                 parent_desc = self.normalize_path(str(p_obj.parent))
-                self.conn.execute(
-                    "UPDATE items SET path = ?, parent_path = ?, name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (p_new, parent_desc, p_obj.name, pid)
-                )
+                
+                # Check for existing updated_at column to avoid errors
+                try:
+                    self.conn.execute(
+                        "UPDATE items SET path = ?, parent_path = ?, name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (p_new, parent_desc, p_obj.name, pid)
+                    )
+                except sqlite3.OperationalError:
+                    self.conn.execute(
+                        "UPDATE items SET path = ?, parent_path = ?, name = ? WHERE id = ?",
+                        (p_new, parent_desc, p_obj.name, pid)
+                    )
         else:
             p_obj = Path(new_path)
             parent_desc = self.normalize_path(str(p_obj.parent))
-            self.conn.execute(
-                "UPDATE items SET path = ?, parent_path = ?, name = ?, updated_at = CURRENT_TIMESTAMP WHERE path = ?",
-                (new_path, parent_desc, p_obj.name, old_path)
-            )
+            try:
+                self.conn.execute(
+                    "UPDATE items SET path = ?, parent_path = ?, name = ?, updated_at = CURRENT_TIMESTAMP WHERE path = ?",
+                    (new_path, parent_desc, p_obj.name, old_path)
+                )
+            except sqlite3.OperationalError:
+                self.conn.execute(
+                    "UPDATE items SET path = ?, parent_path = ?, name = ? WHERE path = ?",
+                    (new_path, parent_desc, p_obj.name, old_path)
+                )
         self.conn.commit()
         return True
 
@@ -375,7 +421,8 @@ class Storage:
             where_clauses.append("name NOT LIKE '.%'")
         if dirs_only:
             where_clauses.append("type = 'folder'")
-        query = "SELECT path, type, name, size FROM items"
+            
+        query = "SELECT path, parent_path, type, name, size FROM items"
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
         query += " ORDER BY path ASC"
@@ -391,66 +438,96 @@ class Storage:
             if max_level is not None and level > max_level:
                 continue
             items.append({
-                "path": path, "type": row["type"],
-                "name": row["name"], "size": row["size"], "level": level
+                "path": path, 
+                "parent_path": row["parent_path"],
+                "type": row["type"],
+                "name": row["name"], 
+                "size": row["size"], 
+                "level": level
             })
         return items
 
     def copy_item(self, old_path: str, new_path: str, recursive: bool = True) -> bool:
+        """Copy a file or folder. If folder, recursively copies descendants."""
         old_path = self.normalize_path(old_path)
         new_path = self.normalize_path(new_path)
+        
         if old_path == "/" or new_path == "/":
             return False
         if new_path.startswith(old_path + "/") or new_path == old_path:
             return False
+            
         item = self.get_item(old_path)
         if not item:
             return False
         if self.get_item(new_path):
             return False
 
-        # FIX: verify destination parent exists
-        new_parent = self.normalize_path(str(Path(new_path).parent))
+        # Verify destination parent exists
+        p_obj_new = Path(new_path)
+        new_parent = self.normalize_path(str(p_obj_new.parent))
         if not self.exists(new_parent):
             return False
             
-        if item["type"] == "file":
-            p_obj = Path(new_path)
-            parent_path = self.normalize_path(str(p_obj.parent))
-            self.conn.execute("""
-                INSERT INTO items (name, path, parent_path, type, telegram_file_id, message_id, 
-                                   peer_id, size, encrypted, session_id, file_hash, encryption_key)
-                SELECT ?, ?, ?, type, telegram_file_id, message_id, 
-                       peer_id, size, encrypted, session_id, file_hash, encryption_key
-                FROM items WHERE path = ?
-            """, (p_obj.name, new_path, parent_path, old_path))
-            self.conn.commit()
-            return True
-        elif recursive:
-            self.create_folder(new_path)
+        if item["type"] == "folder":
+            if not recursive:
+                return False
+            
+            # Get all descendants
             escaped_old = old_path.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            cur = self.conn.execute("""
-                SELECT * FROM items 
-                WHERE path LIKE ? || '/%' ESCAPE '\\' 
-                ORDER BY path ASC
-            """, (escaped_old,))
-            descendants = cur.fetchall()
-            for desc in descendants:
-                rel_path = desc["path"][len(old_path):].lstrip("/")
-                desc_new_path = self.normalize_path(os.path.join(new_path, rel_path))
-                p_desc = Path(desc_new_path)
-                parent_desc = self.normalize_path(str(p_desc.parent))
-                cols = [c for c in desc.keys() if c not in ('id', 'path', 'parent_path', 'name', 'upload_date', 'updated_at')]
-                col_names = ", ".join(cols)
-                placeholders = ", ".join(["?"] * len(cols))
-                vals = [desc[c] for c in cols]
-                self.conn.execute(f"""
-                    INSERT INTO items (name, path, parent_path, {col_names})
-                    VALUES (?, ?, ?, {placeholders})
-                """, (p_desc.name, desc_new_path, parent_desc, *vals))
-            self.conn.commit()
-            return True
-        return False
+            cur = self.conn.execute(
+                "SELECT * FROM items WHERE path = ? OR path LIKE ? || '/%' ESCAPE '\\' ORDER BY path ASC",
+                (old_path, escaped_old)
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                p_old = row["path"]
+                
+                # Path translation
+                if p_old == old_path:
+                    p_new = new_path
+                else:
+                    rel = p_old[len(old_path):].lstrip("/")
+                    p_new = self.normalize_path(new_path + "/" + rel)
+                
+                p_obj = Path(p_new)
+                parent_desc = self.normalize_path(str(p_obj.parent))
+                
+                # Clone item with new path
+                d = dict(row)
+                d["path"] = p_new
+                d["parent_path"] = parent_desc
+                d["name"] = p_obj.name
+                
+                # Filter out auto-generated columns and ID
+                columns = [k for k in d.keys() if k not in ("id", "upload_date", "updated_at")]
+                placeholders = ["?" for _ in columns]
+                vals = [d[k] for k in columns]
+                
+                self.conn.execute(
+                    f"INSERT INTO items ({', '.join(columns)}) VALUES ({', '.join(placeholders)})",
+                    vals
+                )
+        else:
+            # Simple file copy
+            p_obj = Path(new_path)
+            parent_desc = self.normalize_path(str(p_obj.parent))
+            d = dict(item)
+            d["path"] = new_path
+            d["parent_path"] = parent_desc
+            d["name"] = p_obj.name
+            
+            columns = [k for k in d.keys() if k not in ("id", "upload_date", "updated_at")]
+            placeholders = ["?" for _ in columns]
+            vals = [d[k] for k in columns]
+            
+            self.conn.execute(
+                f"INSERT INTO items ({', '.join(columns)}) VALUES ({', '.join(placeholders)})",
+                vals
+            )
+            
+        self.conn.commit()
+        return True
 
     def find_items(self, pattern: str, root_path: str = "/", item_type: Optional[str] = None) -> List[sqlite3.Row]:
         """Find items matching a glob pattern (supporting * and ?)."""

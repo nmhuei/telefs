@@ -69,7 +69,11 @@ def _guard(method):
             self._last_failed = False
         try:
             return method(self, arg)
-        except (ValueError, shlex.ValueError) as exc:
+        except KeyboardInterrupt:
+            self.console.print("\n[yellow]Operation cancelled by user.[/]")
+            if hasattr(self, "_last_failed"):
+                self._last_failed = True
+        except ValueError as exc:
             if hasattr(self, "_last_failed"):
                 self._last_failed = True
             self.console.print(f"[bold red]Syntax error:[/] {exc}")
@@ -430,6 +434,15 @@ Usage: cd [path]   (no arg → /, '-' → previous dir)"""
         return self._complete_remote(text)
 
     # ------------------------------------------------------------------ pwd --
+
+    @_guard
+    def do_bones(self, arg):
+        """
+        Initialize standard Linux directory hierarchy (/bin, /etc, /home, etc.)
+        Usage: bones
+        """
+        created, total = self.fs.init_linux_layout()
+        self.console.print(f"[bold green]Skeleton project initialized![/] Created {created}/{total} directories.")
 
     @_guard
     def do_pwd(self, arg):
@@ -1396,7 +1409,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="telefs",
         description="TeleFS — Telegram as a remote filesystem",
     )
-    parser.add_argument("--version", action="version", version="TeleFS 0.2.14")
+    parser.add_argument("--version", action="version", version="TeleFS 0.2.15")
     sub = parser.add_subparsers(dest="command", help="Sub-command")
 
     sub.add_parser("status", help="Show connection and storage status")
@@ -1404,6 +1417,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("cd",  help="Change working directory (persistent)")
     p.add_argument("path")
+
+    sub.add_parser("bones", help="Initialize standard Linux directory hierarchy (/bin, /etc, /home, etc.)")
+    sub.add_parser("skeleton", help="Alias for bones")
 
     sub.add_parser("pwd", help="Print working directory")
 

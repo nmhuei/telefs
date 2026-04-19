@@ -1,6 +1,6 @@
 {
   "name": "@nmhuei/telefs",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "description": "High-performance virtual filesystem CLI using Telegram Saved Messages as remote storage with AES encryption and deduplication.",
   "main": "bin/telefs.js",
   "bin": {
@@ -8,8 +8,10 @@
   },
   "scripts": {
     "postinstall": "node bin/setup.js",
-    "start": "node bin/telefs.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "setup": "node bin/setup.js",
+    "test": "./.venv/bin/python -m pytest tests/",
+    "prepublishOnly": "npm test",
+    "start": "node bin/telefs.js"
   },
   "keywords": [
     "telegram",

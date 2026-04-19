@@ -132,7 +132,16 @@ class TelegramFSClient:
         """Synchronous wrapper for delete."""
         return self._run_async(self._delete_messages(peer_id, message_ids))
 
-    def disconnect(self):
+    async def _disconnect(self):
+        """Asynchronous disconnect core."""
         if self.client:
-            self._run_async(self.client.disconnect())
+            await self.client.disconnect()
+
+    def disconnect(self):
+        """Safe disconnection wrapper."""
+        if self.client:
+            try:
+                self._run_async(self._disconnect())
+            except Exception:
+                pass # Already disconnected or closing
             self.client = None

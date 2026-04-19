@@ -10,6 +10,7 @@ import shlex
 import sys
 import tempfile
 import subprocess
+import sqlite3
 from pathlib import Path
 from typing import List, Optional
 
@@ -68,10 +69,10 @@ def _guard(method):
             self._last_failed = False
         try:
             return method(self, arg)
-        except KeyboardInterrupt:
+        except (ValueError, shlex.ValueError) as exc:
             if hasattr(self, "_last_failed"):
                 self._last_failed = True
-            self.console.print("\n[dim]Interrupted.[/]")
+            self.console.print(f"[bold red]Syntax error:[/] {exc}")
         except sqlite3.OperationalError as exc:
             if "database is locked" in str(exc).lower():
                 self.console.print("[bold red]Error:[/] Database is locked by another process. Please wait or check if another telefs command is running.")
@@ -1395,7 +1396,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="telefs",
         description="TeleFS — Telegram as a remote filesystem",
     )
-    parser.add_argument("--version", action="version", version="TeleFS 0.2.13")
+    parser.add_argument("--version", action="version", version="TeleFS 0.2.14")
     sub = parser.add_subparsers(dest="command", help="Sub-command")
 
     sub.add_parser("status", help="Show connection and storage status")

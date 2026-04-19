@@ -1,0 +1,69 @@
+#!/usr/bin/env node
+
+const { execSync, spawnSync } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+const projectRoot = path.join(__dirname, '..');
+const venvPath = path.join(projectRoot, '.venv');
+
+console.log('\n🚀 TeleFS: Running post-installation setup...');
+
+function getPython() {
+    try {
+        execSync('python3 --version', { stdio: 'ignore' });
+        return 'python3';
+    } catch (e) {
+        try {
+            execSync('python --version', { stdio: 'ignore' });
+            return 'python';
+        } catch (e2) {
+            return null;
+        }
+    }
+}
+
+const python = getPython();
+if (!python) {
+    console.error('\n❌ Error: Python 3 was not found on your system.');
+    console.error('TeleFS requires Python 3.8+ to function.');
+    console.error('Please install Python and try "npm install -g @nmhuei/telefs" again.\n');
+    process.exit(1);
+}
+
+console.log(`📡 Using: ${python}`);
+
+try {
+    if (!fs.existsSync(venvPath)) {
+        console.log('📦 Creating virtual environment...');
+        execSync(`${python} -m venv "${venvPath}"`, { cwd: projectRoot, stdio: 'inherit' });
+    }
+
+    const pip = path.join(venvPath, 'bin', 'pip');
+    const requirements = path.join(projectRoot, 'requirements.txt');
+
+    console.log('📥 Installing Python dependencies...');
+    execSync(`"${pip}" install -r "${requirements}"`, { stdio: 'inherit' });
+
+    console.log('\n✅ Setup completed successfully!');
+
+    // Path Diagnostic
+    const envPath = process.env.PATH || '';
+    const npmGlobalBin = execSync('npm config get prefix', { encoding: 'utf8' }).trim();
+    const expectedBinPath = path.join(npmGlobalBin, 'bin');
+
+    if (!envPath.includes(expectedBinPath)) {
+        console.log('\n⚠️  ACTION REQUIRED: System PATH configuration');
+        console.log('It looks like your global NPM bin directory is not in your system PATH.');
+        console.log(`Expected PATH to include: ${expectedBinPath}`);
+        console.log('\nTo fix this, add the following line to your ~/.bashrc or ~/.zshrc:');
+        console.log(`\n    export PATH="${expectedBinPath}:$PATH"\n`);
+        console.log('Then run "source ~/.bashrc" (or restart your terminal) to use the "telefs" command.\n');
+    } else {
+        console.log('\n✨ You can now run "telefs" from anywhere!\n');
+    }
+
+} catch (error) {
+    console.error('\n❌ Error during setup:', error.message);
+    process.exit(1);
+}

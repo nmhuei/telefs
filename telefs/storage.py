@@ -290,7 +290,7 @@ class Storage:
         self.conn.commit()
         return len(paths)
 
-    def get_tree(self, root_path: str = "/") -> List[Dict]:
+    def get_tree(self, root_path: str = "/", max_level: Optional[int] = None) -> List[Dict]:
         """Return a list of items for tree display."""
         root_path = self.normalize_path(root_path)
         
@@ -312,6 +312,10 @@ class Storage:
             else:
                 rel = path[len(root_path):].lstrip("/")
                 level = rel.count("/") + (1 if rel else 0)
+            
+            if max_level is not None and level > max_level:
+                continue
+                
             items.append({"path": path, "type": row["type"], "level": level})
         return items
 

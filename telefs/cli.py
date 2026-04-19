@@ -93,9 +93,28 @@ class TeleFSShell(cmd.Cmd):
     def do_tree(self, arg):
         """
         Show directory tree.
-        Example: tree /
+        Usage: tree [path] [-l level]
+        Example: tree / -l 2
         """
-        items = self.fs.storage.get_tree("/")
+        args = shlex.split(arg)
+        path = "/"
+        level = None
+        
+        # Simple manual parsing
+        i = 0
+        while i < len(args):
+            if args[i] == "-l" and i + 1 < len(args):
+                try:
+                    level = int(args[i+1])
+                    i += 2
+                    continue
+                except ValueError:
+                    pass
+            elif not args[i].startswith("-"):
+                path = args[i]
+            i += 1
+            
+        items = self.fs.storage.get_tree(path, max_level=level)
         print_tree_view(self.console, items)
 
     def do_pwd(self, arg):
@@ -316,7 +335,7 @@ def run_one_shot(args):
             items = fs.storage.list_folder(fs.storage.normalize_path(path))
             print_ls_table(console, items, fs)
         elif args.command == "tree":
-            items = fs.storage.get_tree("/")
+            items = fs.storage.get_tree(args.path, max_level=args.level)
             print_tree_view(console, items)
         elif args.command == "pwd":
             print(fs.pwd())
@@ -337,7 +356,7 @@ def run_one_shot(args):
 
 def main():
     parser = argparse.ArgumentParser(description="TeleFS - Telegram as a remote filesystem")
-    parser.add_argument("--version", action="version", version="TeleFS 0.1.8")
+    parser.add_argument("--version", action="version", version="TeleFS 0.1.9")
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
     # status
@@ -348,7 +367,9 @@ def main():
     parser_ls.add_argument("path", nargs="?", default=None)
 
     # tree
-    subparsers.add_parser("tree", help="Print directory tree")
+    parser_tree = subparsers.add_parser("tree", help="Print directory tree")
+    parser_tree.add_argument("path", nargs="?", default="/", help="Path to show tree for")
+    parser_tree.add_argument("-l", "--level", type=int, default=None, help="Maximum depth of the tree")
 
     # pwd
     subparsers.add_parser("pwd", help="Print working directory")

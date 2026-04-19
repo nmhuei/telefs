@@ -111,9 +111,52 @@ class FSManager:
             full = self.storage.normalize_path(os.path.join(self.cwd, path))
         return self.storage.create_folder(full)
 
-    def upload(self, local_path_str: str, remote_folder: str, progress=True) -> bool:
-        """Wrapper to run async chunked upload."""
-        return self.tg._run_async(self._upload_chunked(local_path_str, remote_folder, progress))
+    def upload(self, local_path_str: str, remote_folder: str, recursive=False, progress=True) -> bool:
+        """Upload a file or directory (if recursive)."""
+        local_path = Path(local_path_str).expanduser().resolve()
+        
+        if local_path.is_dir():
+            if not recursive:
+                print(f"Error: '{local_path_str}' is a directory. Use -r for recursive upload.")
+                return False
+            return self.upload_directory(local_path, remote_folder, progress)
+            
+        if not local_path.is_file():
+            print(f"Error: '{local_path_str}' is not a file or directory.")
+            return False
+            
+        return self.tg._run_async(self._upload_chunked(str(local_path), remote_folder, progress))
+
+    def upload_directory(self, local_root: Path, remote_parent: str, progress=True) -> bool:
+        """Handle recursive directory upload."""
+        print(f"Scanning directory: {local_root}")
+        
+        # Determine the target remote root
+        target_remote_root = self.storage.normalize_path(os.path.join(remote_parent, local_root.name))
+        
+        # Create it
+        self.mkdir(target_remote_root)
+        
+        success = True
+        # Walk and upload
+        for root, dirs, files in os.walk(local_root):
+            # Calculate path relative to local_root's parent to keep the root folder name
+            rel_path = os.path.relpath(root, local_root.parent)
+            current_remote_dir = self.storage.normalize_path(os.path.join(remote_parent, rel_path))
+            
+            # Create subdirectories
+            for d in dirs:
+                self.mkdir(os.path.join(current_remote_dir, d))
+            
+            # Upload files
+            for f in files:
+                local_f = os.path.join(root, f)
+                if not self.upload(local_f, current_remote_dir, recursive=False, progress=progress):
+                    success = False
+        
+        if success:
+            print(f"Recursive upload of '{local_root.name}' completed.")
+        return success
 
     async def _upload_chunked(self, local_path_str: str, remote_folder: str, progress=True) -> bool:
         """Upload a file in chunks with resume support and concurrency."""

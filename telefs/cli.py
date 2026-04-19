@@ -128,17 +128,22 @@ class TeleFSShell(cmd.Cmd):
             self.console.print(f"[bold red]Error:[/] Cannot create directory '{args[0]}'. It might already exist.")
 
     def do_upload(self, arg):
-        """
-        Upload a file.
+        """Upload a file or directory.
         Example: upload ~/Pictures/cat.jpg /Photos
+        Example: upload -r ./my_folder /RemoteBackup
         """
         args = shlex.split(arg)
+        recursive = False
+        if "-r" in args:
+            recursive = True
+            args.remove("-r")
+            
         if not args:
-            self.console.print("[bold yellow]Tip:[/] Usage: upload <local_path> [remote_folder]")
+            self.console.print("[bold yellow]Tip:[/] Usage: upload [-r] <local_path> [remote_folder]")
             return
         local = args[0]
         remote = args[1] if len(args) > 1 else "."
-        self.fs.upload(local, remote)
+        self.fs.upload(local, remote, recursive=recursive)
 
     def do_download(self, arg):
         """
@@ -284,8 +289,8 @@ def run_one_shot(args):
         elif args.command == "mkdir":
             if not fs.mkdir(args.path):
                 print(f"mkdir: failed to create '{args.path}'")
-        elif args.command in ("upload", "ul"):
-            fs.upload(args.local, args.remote)
+        elif args.command in ["upload", "ul"]:
+            fs.upload(args.local, args.remote, recursive=args.recursive)
         elif args.command in ("download", "dl"):
             fs.download(args.remote, args.local)
         elif args.command == "rm":
@@ -316,10 +321,16 @@ def main():
     parser_mkdir.add_argument("path", help="Directory path")
 
     # upload
-    for cmd_name in ["upload", "ul"]:
-        p = subparsers.add_parser(cmd_name, help="Upload a file")
-        p.add_argument("local", help="Local file path")
-        p.add_argument("remote", nargs="?", default=".", help="Remote folder path")
+    up_parser = subparsers.add_parser("upload", help="Upload a file or directory")
+    up_parser.add_argument("local", help="Local file or directory path")
+    up_parser.add_argument("remote", nargs="?", default=".", help="Remote folder (default: .)")
+    up_parser.add_argument("-r", "--recursive", action="store_true", help="Upload directory recursively")
+
+    # ul (alias)
+    ul_parser = subparsers.add_parser("ul", help="Upload a file or directory")
+    ul_parser.add_argument("local", help="Local file or directory path")
+    ul_parser.add_argument("remote", nargs="?", default=".", help="Remote folder (default: .)")
+    ul_parser.add_argument("-r", "--recursive", action="store_true", help="Upload directory recursively")
 
     # download
     for cmd_name in ["download", "dl"]:
